@@ -1,0 +1,128 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from tqdm import tqdm
+from .dqn import DQN_CNN
+import copy
+
+class CQL(nn.Module):
+    """
+    Conservative Q-Learning (CQL) for discrete actions
+
+    Adds a conservative regularization term to standard Q-learning
+    to prevent overestimation of out-of-distribution actions
+    """
+    def __init__(self, cnn, hidden_dim=512, action_dim=6, alpha=1.0):
+        super(CQL, self).__init__()
+
+        self.action_dim = action_dim
+        self.alpha = alpha  # CQL regularization weight
+
+        # Frozen CNN (pretrained)
+        self.cnn = cnn
+
+        # Q-network MLP
+        self.q_network = nn.Sequential(
+            nn.Linear(3136, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+        # Target Q-network (MLP only, CNN is frozen)
+        self.q_network_target = copy.deepcopy(self.q_network)
+
+        # Freeze target network
+        for param in self.q_network_target.parameters():
+            param.requires_grad = False
+
+    def forward(self, state):
+        features = self.cnn(state)
+        q_values = self.q_network(features)
+        return q_values
+
+    def get_action(self, state, deterministic=True):
+        if state.dim() == 3:
+            state = state.unsqueeze(0)
+
+        with torch.no_grad():
+            q_values = self.forward(state)
+            action = q_values.argmax(dim=-1)
+
+        return action.item() if action.numel() == 1 else action
+
+    def update_target(self):
+        self.q_network_target.load_state_dict(self.q_network.state_dict())
+
+
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None):
+    model.train()
+    total_td_loss = 0
+    total_cql_loss = 0
+    total_loss_sum = 0
+    total_samples = 0
+
+    pbar = tqdm(dataloader, desc="Training CQL", leave=False)
+    for batch in pbar:
+        state = batch['state'].to(device).float() / 255.0
+        action = batch['action'].to(device)
+        reward = batch['reward'].to(device).float()
+        next_state = batch['next_state'].to(device).float() / 255.0
+        done = batch['done'].to(device).float()
+
+        # Convert one-hot action to class index
+        if action.dim() == 2:
+            action_idx = action.argmax(dim=-1)
+        else:
+            action_idx = action
+
+        # Forward pass
+        q_values = model(state)
+        q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+
+        # Compute target Q-value
+        with torch.no_grad():
+            next_features = model.cnn(next_state)
+            next_q_values = model.q_network_target(next_features)
+            next_q_value = next_q_values.max(dim=1)[0]
+            target_q = reward + gamma * next_q_value * (1 - done)
+
+        # TD loss (Huber loss for stability)
+        td_loss = F.smooth_l1_loss(q_value, target_q)
+
+        # CQL loss: penalize Q-values of all actions, boost Q-value of taken action
+        # CQL term: log(sum(exp(Q(s, a)))) - Q(s, a_taken)
+        logsumexp_q = torch.logsumexp(q_values, dim=1)
+        cql_loss = (logsumexp_q - q_value).mean()
+
+        # Total loss
+        total_loss = td_loss + model.alpha * cql_loss
+
+        # Backward pass
+        optimizer.zero_grad()
+        total_loss.backward()
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+        optimizer.step()
+
+        # Update learning rate
+        if scheduler is not None:
+            scheduler.step()
+
+        # Statistics
+        total_td_loss += td_loss.item() * state.size(0)
+        total_cql_loss += cql_loss.item() * state.size(0)
+        total_loss_sum += total_loss.item() * state.size(0)
+        total_samples += state.size(0)
+
+        # Update progress bar
+        pbar.set_postfix({
+            'td_loss': f'{td_loss.item():.4f}',
+            'cql_loss': f'{cql_loss.item():.4f}',
+            'total': f'{total_loss.item():.4f}'
+        })
+
+    avg_td_loss = total_td_loss / total_samples
+    avg_cql_loss = total_cql_loss / total_samples
+    avg_total_loss = total_loss_sum / total_samples
+
+    return avg_td_loss, avg_cql_loss, avg_total_loss

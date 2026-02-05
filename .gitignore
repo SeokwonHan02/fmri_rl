@@ -1,0 +1,5 @@
+process_game2_data.py
+checkpoints/
+*.pyc
+__pycache__/
+processed_data/
