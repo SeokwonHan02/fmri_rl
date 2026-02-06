@@ -44,6 +44,12 @@ def get_args():
     parser.add_argument('--bcq-threshold', type=float, default=0.3,
                         help='BCQ action filtering threshold')
 
+    # BC and BCQ behavior cloning
+    parser.add_argument('--label-smoothing', type=float, default=0.1,
+                        help='Label smoothing for BC loss (0.0 = no smoothing)')
+    parser.add_argument('--logit-div', type=float, default=2.0,
+                        help='Logit division for temperature scaling')
+
     # Logging and saving
     parser.add_argument('--save-dir', type=str, default='/Users/seokwon/research/fMRI_RL/checkpoints',
                         help='Directory to save model checkpoints')

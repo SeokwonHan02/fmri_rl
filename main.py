@@ -57,12 +57,12 @@ def main():
     print(f"\nCreating {args.algo.upper()} model...")
 
     if args.algo == 'bc':
-        model = BehaviorCloning(cnn, hidden_dim=512, action_dim=6)
+        model = BehaviorCloning(cnn, hidden_dim=512, action_dim=6, logit_div=args.logit_div)
         train_fn = train_bc
         val_fn = val_bc
 
     elif args.algo == 'bcq':
-        model = BCQ(cnn, hidden_dim=512, action_dim=6, threshold=args.bcq_threshold)
+        model = BCQ(cnn, hidden_dim=512, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div)
         train_fn = train_bcq
         val_fn = val_bcq
 
@@ -101,8 +101,8 @@ def main():
 
         # ===== TRAINING =====
         if args.algo == 'bc':
-            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler)
-            val_loss, val_accuracy = val_fn(model, val_loader, device)
+            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler, args.label_smoothing)
+            val_loss, val_accuracy = val_fn(model, val_loader, device, args.label_smoothing)
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
@@ -115,11 +115,11 @@ def main():
 
         elif args.algo == 'bcq':
             train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q, step = train_fn(
-                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq
+                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq, args.label_smoothing
             )
 
             val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
-                model, val_loader, device, args.gamma
+                model, val_loader, device, args.gamma, args.label_smoothing
             )
 
             tqdm.write(

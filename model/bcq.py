@@ -14,11 +14,12 @@ class BCQ(nn.Module):
     2. Imitation network: Learns behavior policy
     3. Target Q-network: For stable Q-learning
     """
-    def __init__(self, cnn, hidden_dim=512, action_dim=6, threshold=0.3):
+    def __init__(self, cnn, hidden_dim=512, action_dim=6, threshold=0.3, logit_div=1.0):
         super(BCQ, self).__init__()
 
         self.action_dim = action_dim
         self.threshold = threshold
+        self.logit_div = logit_div
 
         # Frozen CNN (pretrained)
         self.cnn = cnn
@@ -57,8 +58,11 @@ class BCQ(nn.Module):
         with torch.no_grad():
             q_values, imitation_logits = self.forward(state)
 
+            # Apply temperature scaling to imitation logits
+            scaled_logits = imitation_logits / self.logit_div
+
             # Get imitation probabilities
-            imitation_probs = F.softmax(imitation_logits, dim=-1)
+            imitation_probs = F.softmax(scaled_logits, dim=-1)
 
             # Mask out actions with low imitation probability
             # Only consider actions where prob > (max_prob * threshold)
@@ -78,7 +82,7 @@ class BCQ(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000):
+def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000, label_smoothing=0.0):
     model.train()
     total_q_loss = 0
     total_bc_loss = 0
@@ -131,8 +135,8 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         # Q-learning loss (Huber loss for stability)
         q_loss = F.smooth_l1_loss(q_value, target_q)
 
-        # Behavior cloning loss
-        bc_loss = F.cross_entropy(imitation_logits, action_idx)
+        # Behavior cloning loss with label smoothing
+        bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
 
         # Combined loss (CNN is frozen, Q and Imitation heads are separate)
         total_loss = q_loss + bc_loss
@@ -175,7 +179,7 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
     return avg_q_loss, avg_bc_loss, avg_bc_accuracy, avg_q_value, step
 
 
-def val_bcq(model, dataloader, device, gamma=0.99):
+def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0):
     """Validation function for BCQ with detailed metrics"""
     model.eval()
     total_q_loss = 0
@@ -226,8 +230,8 @@ def val_bcq(model, dataloader, device, gamma=0.99):
             # Q-learning loss
             q_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # Behavior cloning loss
-            bc_loss = F.cross_entropy(imitation_logits, action_idx)
+            # Behavior cloning loss with label smoothing
+            bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
 
             # Statistics
             total_q_loss += q_loss.item() * state.size(0)

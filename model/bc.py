@@ -9,11 +9,12 @@ class BehaviorCloning(nn.Module):
     Behavior Cloning model
     Architecture: DQN_CNN -> MLP(3136 -> 512 -> 6)
     """
-    def __init__(self, cnn, hidden_dim=512, action_dim=6):
+    def __init__(self, cnn, hidden_dim=512, action_dim=6, logit_div=1.0):
         super(BehaviorCloning, self).__init__()
 
         self.cnn = cnn
         self.action_dim = action_dim
+        self.logit_div = logit_div
 
         # MLP layers (randomly initialized)
         self.mlp = nn.Sequential(
@@ -34,16 +35,19 @@ class BehaviorCloning(nn.Module):
         with torch.no_grad():
             logits = self.forward(state)
 
+            # Apply temperature scaling
+            scaled_logits = logits / self.logit_div
+
             if deterministic:
-                action = logits.argmax(dim=-1)
+                action = scaled_logits.argmax(dim=-1)
             else:
-                probs = F.softmax(logits, dim=-1)
+                probs = F.softmax(scaled_logits, dim=-1)
                 action = torch.multinomial(probs, 1).squeeze(-1)
 
         return action.item() if action.numel() == 1 else action
 
 
-def train_bc(model, dataloader, optimizer, device, scheduler=None):
+def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothing=0.0):
     model.train()
     total_loss = 0
     total_correct = 0
@@ -61,8 +65,8 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None):
         # Forward pass
         logits = model(state)
 
-        # Compute cross-entropy loss
-        loss = F.cross_entropy(logits, action)
+        # Compute cross-entropy loss with label smoothing
+        loss = F.cross_entropy(logits, action, label_smoothing=label_smoothing)
 
         # Backward pass
         optimizer.zero_grad()
@@ -93,7 +97,7 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None):
     return avg_loss, avg_accuracy
 
 
-def val_bc(model, dataloader, device):
+def val_bc(model, dataloader, device, label_smoothing=0.0):
     """Validation function for Behavior Cloning"""
     model.eval()
     total_loss = 0
@@ -112,8 +116,8 @@ def val_bc(model, dataloader, device):
             # Forward pass
             logits = model(state)
 
-            # Compute cross-entropy loss
-            loss = F.cross_entropy(logits, action)
+            # Compute cross-entropy loss with label smoothing
+            loss = F.cross_entropy(logits, action, label_smoothing=label_smoothing)
 
             # Statistics
             total_loss += loss.item() * state.size(0)
