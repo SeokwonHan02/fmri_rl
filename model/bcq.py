@@ -78,15 +78,17 @@ class BCQ(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None):
+def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000):
     model.train()
     total_q_loss = 0
     total_bc_loss = 0
     total_bc_correct = 0
+    total_q_value = 0
     total_samples = 0
 
     pbar = tqdm(dataloader, desc="Training BCQ", leave=False)
     for batch in pbar:
+        step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
         reward = batch['reward'].to(device).float()
@@ -132,38 +134,112 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None):
         # Behavior cloning loss
         bc_loss = F.cross_entropy(imitation_logits, action_idx)
 
-        # Update Q-network
-        optimizer.zero_grad()
-        q_loss.backward(retain_graph=True)
-        torch.nn.utils.clip_grad_norm_(model.q_network.parameters(), 10.0)
-        optimizer.step()
+        # Combined loss (CNN is frozen, Q and Imitation heads are separate)
+        total_loss = q_loss + bc_loss
 
-        # Update imitation network
+        # Single backward and optimizer step
         optimizer.zero_grad()
-        bc_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.imitation_network.parameters(), 10.0)
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
         # Update learning rate (once per batch)
         if scheduler is not None:
             scheduler.step()
 
+        # Update target network
+        if step % target_update_freq == 0:
+            model.update_target()
+
         # Statistics
         total_q_loss += q_loss.item() * state.size(0)
         total_bc_loss += bc_loss.item() * state.size(0)
         pred = imitation_logits.argmax(dim=-1)
         total_bc_correct += (pred == action_idx).sum().item()
+        total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
 
         # Update progress bar
         pbar.set_postfix({
             'q_loss': f'{q_loss.item():.4f}',
             'bc_loss': f'{bc_loss.item():.4f}',
-            'bc_acc': f'{(pred == action_idx).float().mean().item():.4f}'
+            'bc_acc': f'{(pred == action_idx).float().mean().item():.4f}',
+            'avg_q': f'{q_values.mean().item():.2f}'
         })
 
     avg_q_loss = total_q_loss / total_samples
     avg_bc_loss = total_bc_loss / total_samples
     avg_bc_accuracy = total_bc_correct / total_samples
+    avg_q_value = total_q_value / total_samples
 
-    return avg_q_loss, avg_bc_loss, avg_bc_accuracy
+    return avg_q_loss, avg_bc_loss, avg_bc_accuracy, avg_q_value, step
+
+
+def val_bcq(model, dataloader, device, gamma=0.99):
+    """Validation function for BCQ with detailed metrics"""
+    model.eval()
+    total_q_loss = 0
+    total_bc_loss = 0
+    total_bc_correct = 0
+    total_q_value = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            state = batch['state'].to(device).float() / 255.0
+            action = batch['action'].to(device)
+            reward = batch['reward'].to(device).float()
+            next_state = batch['next_state'].to(device).float() / 255.0
+            done = batch['done'].to(device).float()
+
+            # Convert one-hot action to class index
+            if action.dim() == 2:
+                action_idx = action.argmax(dim=-1)
+            else:
+                action_idx = action
+
+            # Forward pass
+            q_values, imitation_logits = model(state)
+            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+
+            # Compute target Q-value
+            next_features = model.cnn(next_state)
+            next_q_values = model.q_network_target(next_features)
+
+            # Get next imitation probabilities
+            next_imitation_logits = model.imitation_network(next_features)
+            next_imitation_probs = F.softmax(next_imitation_logits, dim=-1)
+
+            # Mask out actions with low imitation probability
+            max_prob = next_imitation_probs.max(dim=-1, keepdim=True)[0]
+            mask = next_imitation_probs > (max_prob * model.threshold)
+            if not mask.any(dim=-1).all():
+                mask = torch.ones_like(mask, dtype=torch.bool)
+
+            masked_next_q = next_q_values.clone()
+            masked_next_q[~mask] = -float('inf')
+
+            # Max Q-value among valid actions
+            next_q_value = masked_next_q.max(dim=1)[0]
+            target_q = reward + gamma * next_q_value * (1 - done)
+
+            # Q-learning loss
+            q_loss = F.smooth_l1_loss(q_value, target_q)
+
+            # Behavior cloning loss
+            bc_loss = F.cross_entropy(imitation_logits, action_idx)
+
+            # Statistics
+            total_q_loss += q_loss.item() * state.size(0)
+            total_bc_loss += bc_loss.item() * state.size(0)
+            pred = imitation_logits.argmax(dim=-1)
+            total_bc_correct += (pred == action_idx).sum().item()
+            total_q_value += q_values.mean().item() * state.size(0)
+            total_samples += state.size(0)
+
+    avg_q_loss = total_q_loss / total_samples
+    avg_bc_loss = total_bc_loss / total_samples
+    avg_bc_accuracy = total_bc_correct / total_samples
+    avg_q_value = total_q_value / total_samples
+
+    return avg_q_loss, avg_bc_loss, avg_bc_accuracy, avg_q_value

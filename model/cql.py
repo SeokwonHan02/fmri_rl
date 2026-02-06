@@ -54,15 +54,17 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000):
     model.train()
     total_td_loss = 0
     total_cql_loss = 0
     total_loss_sum = 0
+    total_q_value = 0
     total_samples = 0
 
     pbar = tqdm(dataloader, desc="Training CQL", leave=False)
     for batch in pbar:
+        step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
         reward = batch['reward'].to(device).float()
@@ -108,21 +110,86 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None):
         if scheduler is not None:
             scheduler.step()
 
+        # Update target network
+        if step % target_update_freq == 0:
+            model.update_target()
+
         # Statistics
         total_td_loss += td_loss.item() * state.size(0)
         total_cql_loss += cql_loss.item() * state.size(0)
         total_loss_sum += total_loss.item() * state.size(0)
+        total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
 
         # Update progress bar
         pbar.set_postfix({
             'td_loss': f'{td_loss.item():.4f}',
             'cql_loss': f'{cql_loss.item():.4f}',
-            'total': f'{total_loss.item():.4f}'
+            'total': f'{total_loss.item():.4f}',
+            'avg_q': f'{q_values.mean().item():.2f}'
         })
 
     avg_td_loss = total_td_loss / total_samples
     avg_cql_loss = total_cql_loss / total_samples
     avg_total_loss = total_loss_sum / total_samples
+    avg_q_value = total_q_value / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, step
+
+
+def val_cql(model, dataloader, device, gamma=0.99):
+    """Validation function for CQL with detailed metrics"""
+    model.eval()
+    total_td_loss = 0
+    total_cql_loss = 0
+    total_loss_sum = 0
+    total_q_value = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            state = batch['state'].to(device).float() / 255.0
+            action = batch['action'].to(device)
+            reward = batch['reward'].to(device).float()
+            next_state = batch['next_state'].to(device).float() / 255.0
+            done = batch['done'].to(device).float()
+
+            # Convert one-hot action to class index
+            if action.dim() == 2:
+                action_idx = action.argmax(dim=-1)
+            else:
+                action_idx = action
+
+            # Forward pass
+            q_values = model(state)
+            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+
+            # Compute target Q-value
+            next_features = model.cnn(next_state)
+            next_q_values = model.q_network_target(next_features)
+            next_q_value = next_q_values.max(dim=1)[0]
+            target_q = reward + gamma * next_q_value * (1 - done)
+
+            # TD loss
+            td_loss = F.smooth_l1_loss(q_value, target_q)
+
+            # CQL loss
+            logsumexp_q = torch.logsumexp(q_values, dim=1)
+            cql_loss = (logsumexp_q - q_value).mean()
+
+            # Total loss
+            total_loss = td_loss + model.alpha * cql_loss
+
+            # Statistics
+            total_td_loss += td_loss.item() * state.size(0)
+            total_cql_loss += cql_loss.item() * state.size(0)
+            total_loss_sum += total_loss.item() * state.size(0)
+            total_q_value += q_values.mean().item() * state.size(0)
+            total_samples += state.size(0)
+
+    avg_td_loss = total_td_loss / total_samples
+    avg_cql_loss = total_cql_loss / total_samples
+    avg_total_loss = total_loss_sum / total_samples
+    avg_q_value = total_q_value / total_samples
+
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value

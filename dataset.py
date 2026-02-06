@@ -9,31 +9,33 @@ class OfflineRLDataset(Dataset):
     Dataset for offline RL
     Loads all processed npz files and provides transitions (s, a, r, s', done)
     """
-    def __init__(self, data_dir, subject='all', max_files=None):
-        """
-        Args:
-            data_dir: Base directory containing processed data
-            subject: Which subject to load ('all', 'sub_1', ..., 'sub_6')
-            max_files: Maximum number of files to load (None = load all)
-        """
-        self.data_dir = Path(data_dir)
-        self.subject = subject
+    def __init__(self, data_dir=None, subject=None, max_files=None, npz_files=None):
+        # If npz_files is provided, use it directly
+        if npz_files is not None:
+            files_to_load = npz_files
+            if max_files is not None:
+                files_to_load = files_to_load[:max_files]
+        else:
+            # Find files from data_dir and subject
+            if data_dir is None or subject is None:
+                raise ValueError("Either npz_files or both data_dir and subject must be provided")
 
-        # Load from specific subject directory
-        search_dirs = [self.data_dir / subject]
-        if not search_dirs[0].exists():
-            raise ValueError(f"Subject directory not found: {search_dirs[0]}")
+            self.data_dir = Path(data_dir)
+            self.subject = subject
 
-        # Find all npz files
-        npz_files = []
-        for search_dir in search_dirs:
-            npz_files.extend(sorted(glob.glob(str(search_dir / '*.npz'))))
+            # Load from specific subject directory
+            subject_dir = self.data_dir / subject
+            if not subject_dir.exists():
+                raise ValueError(f"Subject directory not found: {subject_dir}")
 
-        if max_files is not None:
-            npz_files = npz_files[:max_files]
+            # Find all npz files
+            files_to_load = sorted(glob.glob(str(subject_dir / '*.npz')))
 
-        print(f"Loading data from subject: {subject}")
-        print(f"  Found {len(npz_files)} files")
+            if max_files is not None:
+                files_to_load = files_to_load[:max_files]
+
+            print(f"Loading data from subject: {subject}")
+            print(f"  Found {len(files_to_load)} files")
 
         # Load all data into memory
         self.states = []
@@ -44,7 +46,7 @@ class OfflineRLDataset(Dataset):
 
         total_transitions = 0
 
-        for npz_file in npz_files:
+        for npz_file in files_to_load:
             data = np.load(npz_file)
 
             self.states.append(data['state'])
@@ -72,10 +74,17 @@ class OfflineRLDataset(Dataset):
         state = torch.from_numpy(self.states[idx]).permute(2, 0, 1)  # (84, 84, 4) -> (4, 84, 84)
         next_state = torch.from_numpy(self.next_states[idx]).permute(2, 0, 1)  # (84, 84, 4) -> (4, 84, 84)
 
+        # Convert action to appropriate type
+        action = torch.from_numpy(self.actions[idx])
+        if action.dim() == 1 and len(action) > 1:  # One-hot encoded
+            action = action.float()
+        elif action.dim() == 0:  # Scalar index
+            action = action.long()
+
         return {
             'state': state,  # (4, 84, 84) uint8
-            'action': torch.from_numpy(self.actions[idx]),  # (6,) float64
-            'reward': torch.tensor(self.rewards[idx]),  # scalar
+            'action': action,  # (6,) float or scalar long
+            'reward': torch.tensor(self.rewards[idx], dtype=torch.float32),  # scalar
             'next_state': next_state,  # (4, 84, 84) uint8
             'done': torch.tensor(self.dones[idx], dtype=torch.float32)  # scalar
         }
@@ -95,6 +104,64 @@ def create_dataloader(data_dir, batch_size, subject, num_workers=4, shuffle=True
         pin_memory=use_pin_memory
     )
     return dataloader
+
+
+def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, val_split=0.1):
+    """
+    Create train and validation dataloaders by splitting files
+    """
+    # Find all npz files
+    subject_dir = Path(data_dir) / subject
+    if not subject_dir.exists():
+        raise ValueError(f"Subject directory not found: {subject_dir}")
+
+    npz_files = sorted(glob.glob(str(subject_dir / '*.npz')))
+    n_files = len(npz_files)
+
+    if n_files == 0:
+        raise ValueError(f"No npz files found in {subject_dir}")
+
+    # Calculate split
+    n_val = max(1, int(n_files * val_split))
+    n_train = n_files - n_val
+
+    print(f"\nSplitting data:")
+    print(f"  Total files: {n_files}")
+    print(f"  Train files: {n_train}")
+    print(f"  Val files: {n_val}")
+
+    # Split files (last n_val files for validation)
+    train_files = npz_files[:n_train]
+    val_files = npz_files[n_train:]
+
+    # Create datasets using the npz_files parameter
+    print(f"\nLoading training data...")
+    train_dataset = OfflineRLDataset(npz_files=train_files)
+
+    print(f"\nLoading validation data...")
+    val_dataset = OfflineRLDataset(npz_files=val_files)
+
+    # Disable pin_memory for MPS (Apple Silicon GPU)
+    use_pin_memory = torch.cuda.is_available()
+
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=use_pin_memory
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=use_pin_memory
+    )
+
+    return train_loader, val_loader
 
 
 if __name__ == '__main__':

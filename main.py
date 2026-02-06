@@ -3,16 +3,15 @@ import torch.optim as optim
 import numpy as np
 import random
 from pathlib import Path
-import os
 from tqdm import tqdm
 
 from args import get_args
-from dataset import create_dataloader
+from dataset import create_train_val_dataloaders
 from model import (
     load_pretrained_cnn,
-    BehaviorCloning, train_bc,
-    BCQ, train_bcq,
-    CQL, train_cql
+    BehaviorCloning, train_bc, val_bc,
+    BCQ, train_bcq, val_bcq,
+    CQL, train_cql, val_cql
 )
 
 
@@ -36,17 +35,18 @@ def main():
     # Create save directory
     save_dir = Path(args.save_dir) / args.algo
     save_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Checkpoints will be saved to: {save_dir}")
+    print(f"Models will be saved to: {save_dir}")
 
     print("\nLoading data...")
-    dataloader = create_dataloader(
+    train_loader, val_loader = create_train_val_dataloaders(
         args.data_dir,
         batch_size=args.batch_size,
         subject=args.subject,
         num_workers=args.num_workers,
-        shuffle=True
+        val_split=1.0/11  # 11개 중 1개
     )
-    print(f"Total batches per epoch: {len(dataloader)}")
+    print(f"Train batches per epoch: {len(train_loader)}")
+    print(f"Val batches: {len(val_loader)}")
 
     print("\nLoading pretrained DQN CNN...")
     cnn = load_pretrained_cnn(args.dqn_path)
@@ -58,14 +58,17 @@ def main():
     if args.algo == 'bc':
         model = BehaviorCloning(cnn, hidden_dim=512, action_dim=6)
         train_fn = train_bc
+        val_fn = val_bc
 
     elif args.algo == 'bcq':
         model = BCQ(cnn, hidden_dim=512, action_dim=6, threshold=args.bcq_threshold)
         train_fn = train_bcq
+        val_fn = val_bcq
 
     elif args.algo == 'cql':
         model = CQL(cnn, hidden_dim=512, action_dim=6, alpha=args.cql_alpha)
         train_fn = train_cql
+        val_fn = val_cql
 
     else:
         raise ValueError(f"Unknown algorithm: {args.algo}")
@@ -79,7 +82,7 @@ def main():
     )
 
     # Learning rate scheduler (Cosine Annealing)
-    total_steps = args.epochs * len(dataloader)
+    total_steps = args.epochs * len(train_loader)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=total_steps,
@@ -90,87 +93,66 @@ def main():
     print(f"\nStarting training for {args.epochs} epochs...")
     print("="*80)
 
-    best_metric = float('inf') if args.algo == 'bc' else float('-inf')
     step = 0
 
     for epoch in tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch"):
         current_lr = optimizer.param_groups[0]['lr']
 
-        # Train
+        # ===== TRAINING =====
         if args.algo == 'bc':
-            loss, accuracy = train_fn(model, dataloader, optimizer, device, scheduler)
-            tqdm.write(f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e} | Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
+            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler)
+            val_loss, val_accuracy = val_fn(model, val_loader, device)
 
-            # Save best model based on accuracy
-            if accuracy > best_metric:
-                best_metric = accuracy
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'accuracy': accuracy,
-                    'loss': loss,
-                }, save_dir / 'best_model.pth')
-                tqdm.write(f"  ✓ Saved best model (accuracy: {accuracy:.4f})")
+            tqdm.write(
+                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"  Train - Loss: {train_loss:.4f}, Acc: {train_accuracy:.4f}\n"
+                f"  Val   - Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}"
+            )
+
+            # Save model for this epoch
+            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
 
         elif args.algo == 'bcq':
-            q_loss, bc_loss, bc_accuracy = train_fn(model, dataloader, optimizer, device, args.gamma, scheduler)
-            tqdm.write(f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e} | Q Loss: {q_loss:.4f}, BC Loss: {bc_loss:.4f}, BC Accuracy: {bc_accuracy:.4f}")
+            train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q, step = train_fn(
+                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq
+            )
 
-            # Update target network
-            if step % args.target_update_freq == 0:
-                model.update_target()
-                tqdm.write(f"  ✓ Updated target network")
+            val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
+                model, val_loader, device, args.gamma
+            )
 
-            # Save best model based on BC accuracy
-            if bc_accuracy > best_metric:
-                best_metric = bc_accuracy
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'q_loss': q_loss,
-                    'bc_loss': bc_loss,
-                    'bc_accuracy': bc_accuracy,
-                }, save_dir / 'best_model.pth')
-                tqdm.write(f"  ✓ Saved best model (BC accuracy: {bc_accuracy:.4f})")
+            tqdm.write(
+                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"  Train - Q Loss: {train_q_loss:.4f}, BC Loss: {train_bc_loss:.4f}, BC Acc: {train_bc_accuracy:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                f"  Val   - Q Loss: {val_q_loss:.4f}, BC Loss: {val_bc_loss:.4f}, BC Acc: {val_bc_accuracy:.4f}, Avg Q: {val_avg_q:.2f}"
+            )
+
+            # Save model for this epoch
+            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
 
         elif args.algo == 'cql':
-            td_loss, cql_loss, total_loss = train_fn(model, dataloader, optimizer, device, args.gamma, scheduler)
-            tqdm.write(f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e} | TD Loss: {td_loss:.4f}, CQL Loss: {cql_loss:.4f}, Total Loss: {total_loss:.4f}")
+            train_td_loss, train_cql_loss, train_total_loss, train_avg_q, step = train_fn(
+                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq
+            )
 
-            # Update target network
-            if step % args.target_update_freq == 0:
-                model.update_target()
-                tqdm.write(f"  ✓ Updated target network")
+            val_td_loss, val_cql_loss, val_total_loss, val_avg_q = val_cql(
+                model, val_loader, device, args.gamma
+            )
 
-            # Save best model based on lowest total loss
-            if total_loss < best_metric or best_metric == float('-inf'):
-                best_metric = total_loss
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'td_loss': td_loss,
-                    'cql_loss': cql_loss,
-                    'total_loss': total_loss,
-                }, save_dir / 'best_model.pth')
-                tqdm.write(f"  ✓ Saved best model (total loss: {total_loss:.4f})")
+            tqdm.write(
+                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}"
+            )
 
-        step += len(dataloader)
+            # Save model for this epoch
+            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
 
-        # Save checkpoint
-        if epoch % args.save_interval == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, save_dir / f'checkpoint_epoch_{epoch}.pth')
-            tqdm.write(f"  ✓ Saved checkpoint")
+        tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
     print("\n" + "="*80)
     print("Training complete!")
-    print(f"Best model saved to: {save_dir / 'best_model.pth'}")
+    print(f"All models saved to: {save_dir}")
 
 
 if __name__ == '__main__':

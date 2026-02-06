@@ -91,3 +91,37 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None):
     avg_accuracy = total_correct / total_samples
 
     return avg_loss, avg_accuracy
+
+
+def val_bc(model, dataloader, device):
+    """Validation function for Behavior Cloning"""
+    model.eval()
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            state = batch['state'].to(device).float() / 255.0
+            action = batch['action'].to(device)
+
+            # Convert one-hot action to class index
+            if action.dim() == 2:
+                action = action.argmax(dim=-1)
+
+            # Forward pass
+            logits = model(state)
+
+            # Compute cross-entropy loss
+            loss = F.cross_entropy(logits, action)
+
+            # Statistics
+            total_loss += loss.item() * state.size(0)
+            pred = logits.argmax(dim=-1)
+            total_correct += (pred == action).sum().item()
+            total_samples += state.size(0)
+
+    avg_loss = total_loss / total_samples
+    avg_accuracy = total_correct / total_samples
+
+    return avg_loss, avg_accuracy
