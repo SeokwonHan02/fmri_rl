@@ -13,6 +13,7 @@ from model import (
     BCQ, train_bcq, val_bcq,
     CQL, train_cql, val_cql
 )
+from eval import evaluate_agent
 
 
 def set_seed(seed):
@@ -149,6 +150,20 @@ def main():
             torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
 
         tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
+
+        # ===== EVALUATION =====
+        if epoch % args.eval_interval == 0:
+            tqdm.write(f"\n{'='*80}")
+            tqdm.write(f"EVALUATION at Epoch {epoch}")
+            tqdm.write(f"{'='*80}")
+
+            eval_stats = evaluate_agent(model, args.env_name, device, args.eval_episodes, args.seed + epoch)
+            tqdm.write(
+                f"  Eval - Mean Reward: {eval_stats['mean_reward']:.2f} ± {eval_stats['std_reward']:.2f}\n"
+                f"         Min: {eval_stats['min_reward']:.1f}, Max: {eval_stats['max_reward']:.1f}\n"
+                f"         Mean Length: {eval_stats['mean_length']:.1f}"
+            )
+            tqdm.write(f"{'='*80}\n")
 
     print("\n" + "="*80)
     print("Training complete!")
