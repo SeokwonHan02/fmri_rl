@@ -1,20 +1,34 @@
 import torch
 import numpy as np
 import gymnasium as gym
-import ale_py
 from gymnasium.wrappers import AtariPreprocessing, FrameStackObservation
 
-
-def make_atari_env(env_name='SpaceInvadersNoFrameskip-v4', seed=0):
-    """Create Atari environment with standard preprocessing"""
-    # Register ALE environments
+# Import and register ALE
+try:
+    import ale_py
     gym.register_envs(ale_py)
+except ImportError:
+    print("Warning: ale_py not found. Make sure to install it: pip install ale-py")
+except Exception as e:
+    print(f"Warning: Failed to register ALE environments: {e}")
 
+
+def make_atari_env(env_name='ALE/SpaceInvaders-v5', seed=0):
+    """Create Atari environment with standard preprocessing"""
     # Create environment (rgb_array for headless server environments)
-    env = gym.make(env_name, frameskip=1, render_mode='rgb_array')
+    env = gym.make(env_name, render_mode='rgb_array')
 
     # Atari preprocessing: grayscale, resize, etc.
-    env = AtariPreprocessing(env, frame_skip=4)
+    # Note: ALE/SpaceInvaders-v5 already includes frameskip=4 by default
+    env = AtariPreprocessing(
+        env,
+        noop_max=30,
+        frame_skip=1,  # Already handled by ALE
+        screen_size=84,
+        terminal_on_life_loss=False,
+        grayscale_obs=True,
+        scale_obs=False
+    )
 
     # Stack 4 frames
     env = FrameStackObservation(env, stack_size=4)
