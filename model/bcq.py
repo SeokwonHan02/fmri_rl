@@ -8,13 +8,14 @@ import copy
 class BCQ(nn.Module):
     """
     Batch Constrained Q-learning (BCQ) for discrete actions
+    Architecture: DQN_CNN (frozen, outputs 3136) -> Linear(3136 -> 512) -> Linear(512 -> 6)
 
     Consists of:
-    1. Q-network: Estimates Q-values
-    2. Imitation network: Learns behavior policy
+    1. Q-network: Estimates Q-values (3136 -> 512 -> 6)
+    2. Imitation network: Learns behavior policy (3136 -> 512 -> 6)
     3. Target Q-network: For stable Q-learning
     """
-    def __init__(self, cnn, hidden_dim=512, action_dim=6, threshold=0.3, logit_div=1.0):
+    def __init__(self, cnn, action_dim=6, threshold=0.3, logit_div=1.0):
         super(BCQ, self).__init__()
 
         self.action_dim = action_dim
@@ -24,21 +25,21 @@ class BCQ(nn.Module):
         # Frozen CNN (pretrained)
         self.cnn = cnn
 
-        # Q-network MLP
+        # Q-network: 3136 -> 512 -> 6 (randomly initialized)
         self.q_network = nn.Sequential(
-            nn.Linear(3136, hidden_dim),
+            nn.Linear(3136, 512),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
+            nn.Linear(512, action_dim)
         )
 
-        # Imitation network MLP (behavior cloning)
+        # Imitation network: 3136 -> 512 -> 6 (randomly initialized)
         self.imitation_network = nn.Sequential(
-            nn.Linear(3136, hidden_dim),
+            nn.Linear(3136, 512),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
+            nn.Linear(512, action_dim)
         )
 
-        # Target Q-network (MLP only, CNN is frozen)
+        # Target Q-network (CNN is frozen)
         self.q_network_target = copy.deepcopy(self.q_network)
 
         # Freeze target network
@@ -95,7 +96,7 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
-        reward = batch['reward'].to(device).float()
+        reward = batch['reward'].to(device).float() / 10.0  # Reward scaling
         next_state = batch['next_state'].to(device).float() / 255.0
         done = batch['done'].to(device).float()
 
@@ -192,7 +193,7 @@ def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0):
         for batch in dataloader:
             state = batch['state'].to(device).float() / 255.0
             action = batch['action'].to(device)
-            reward = batch['reward'].to(device).float()
+            reward = batch['reward'].to(device).float() / 10.0  # Reward scaling
             next_state = batch['next_state'].to(device).float() / 255.0
             done = batch['done'].to(device).float()
 

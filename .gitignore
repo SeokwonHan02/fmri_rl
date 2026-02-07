@@ -3,3 +3,4 @@ checkpoints/
 *.pyc
 __pycache__/
 processed_data/
+pretrained/

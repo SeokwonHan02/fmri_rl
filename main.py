@@ -57,17 +57,17 @@ def main():
     print(f"\nCreating {args.algo.upper()} model...")
 
     if args.algo == 'bc':
-        model = BehaviorCloning(cnn, hidden_dim=512, action_dim=6, logit_div=args.logit_div)
+        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
         train_fn = train_bc
         val_fn = val_bc
 
     elif args.algo == 'bcq':
-        model = BCQ(cnn, hidden_dim=512, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div)
+        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div)
         train_fn = train_bcq
         val_fn = val_bcq
 
     elif args.algo == 'cql':
-        model = CQL(cnn, hidden_dim=512, action_dim=6, alpha=args.cql_alpha)
+        model = CQL(cnn, action_dim=6, alpha=args.cql_alpha)
         train_fn = train_cql
         val_fn = val_cql
 

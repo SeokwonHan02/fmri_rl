@@ -7,25 +7,25 @@ from .dqn import DQN_CNN
 class BehaviorCloning(nn.Module):
     """
     Behavior Cloning model
-    Architecture: DQN_CNN -> MLP(3136 -> 512 -> 6)
+    Architecture: DQN_CNN (frozen, outputs 3136) -> Linear(3136 -> 512) -> Linear(512 -> 6)
     """
-    def __init__(self, cnn, hidden_dim=512, action_dim=6, logit_div=1.0):
+    def __init__(self, cnn, action_dim=6, logit_div=1.0):
         super(BehaviorCloning, self).__init__()
 
         self.cnn = cnn
         self.action_dim = action_dim
         self.logit_div = logit_div
 
-        # MLP layers (randomly initialized)
-        self.mlp = nn.Sequential(
-            nn.Linear(3136, hidden_dim),
+        # Action head: 3136 -> 512 -> 6 (randomly initialized)
+        self.action_head = nn.Sequential(
+            nn.Linear(3136, 512),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
+            nn.Linear(512, action_dim)
         )
 
     def forward(self, state):
         features = self.cnn(state)  # (batch, 3136)
-        action_logits = self.mlp(features)  # (batch, 6)
+        action_logits = self.action_head(features)  # (batch, 6)
         return action_logits
 
     def get_action(self, state, deterministic=True):

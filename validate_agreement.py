@@ -36,8 +36,6 @@ def get_validation_args():
                         help='Path to trained BCQ model')
 
     # Model config
-    parser.add_argument('--hidden-dim', type=int, default=512,
-                        help='Hidden dimension for models')
     parser.add_argument('--action-dim', type=int, default=6,
                         help='Action dimension (6 for Space Invaders)')
 
@@ -57,13 +55,13 @@ def get_validation_args():
     return parser.parse_args()
 
 
-def load_model(model_path, model_class, cnn, hidden_dim, action_dim, device):
+def load_model(model_path, model_class, cnn, action_dim, device):
     if not Path(model_path).exists():
         print(f"  ⚠️  Model file not found: {model_path}")
         return None
 
     try:
-        model = model_class(cnn, hidden_dim=hidden_dim, action_dim=action_dim).to(device)
+        model = model_class(cnn, action_dim=action_dim).to(device)
         state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
         model.eval()
@@ -121,21 +119,21 @@ def validate_agreement(args):
     if 'bc' in args.models:
         print("  Loading BC (Behavior Cloning)...")
         bc_model = load_model(args.bc_path, BehaviorCloning, cnn,
-                             args.hidden_dim, args.action_dim, device)
+                             args.action_dim, device)
         if bc_model is not None:
             models['bc'] = bc_model
 
     if 'cql' in args.models:
         print("  Loading CQL (Conservative Q-Learning)...")
         cql_model = load_model(args.cql_path, CQL, cnn,
-                              args.hidden_dim, args.action_dim, device)
+                              args.action_dim, device)
         if cql_model is not None:
             models['cql'] = cql_model
 
     if 'bcq' in args.models:
         print("  Loading BCQ (Batch-Constrained Q-Learning)...")
         bcq_model = load_model(args.bcq_path, BCQ, cnn,
-                              args.hidden_dim, args.action_dim, device)
+                              args.action_dim, device)
         if bcq_model is not None:
             models['bcq'] = bcq_model
 
