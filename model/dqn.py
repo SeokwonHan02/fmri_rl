@@ -33,24 +33,38 @@ class DQN_CNN(nn.Module):
 
 
 def load_pretrained_cnn(pretrained_path):
-    """
-    Load pretrained CNN from checkpoint
-
-    Args:
-        pretrained_path: Path to the pretrained CNN checkpoint
-
-    Returns:
-        cnn: Loaded and frozen CNN model
-    """
     cnn = DQN_CNN()
 
     try:
         checkpoint = torch.load(pretrained_path, map_location='cpu')
 
-        # Load state dict directly (our format from download_and_extract_cnn.py)
-        cnn.load_state_dict(checkpoint, strict=True)
+        # Extract policy_net if checkpoint has the full training state
+        if 'policy_net' in checkpoint:
+            state_dict = checkpoint['policy_net']
+        else:
+            state_dict = checkpoint
+
+        # Map checkpoint keys (conv1, conv2, conv3) to DQN_CNN keys (cnn.0, cnn.2, cnn.4)
+        # Filter out MLP layers (fc3, fc_out)
+        key_mapping = {
+            'conv1.weight': 'cnn.0.weight',
+            'conv1.bias': 'cnn.0.bias',
+            'conv2.weight': 'cnn.2.weight',
+            'conv2.bias': 'cnn.2.bias',
+            'conv3.weight': 'cnn.4.weight',
+            'conv3.bias': 'cnn.4.bias',
+        }
+
+        # Create new state dict with mapped keys (CNN only, no MLP)
+        mapped_state_dict = {}
+        for old_key, new_key in key_mapping.items():
+            if old_key in state_dict:
+                mapped_state_dict[new_key] = state_dict[old_key]
+
+        # Load only CNN parameters, ignore MLP (fc3, fc_out)
+        cnn.load_state_dict(mapped_state_dict, strict=True)
         print(f"✓ Loaded pretrained CNN from {pretrained_path}")
-        print(f"  Loaded {len(checkpoint)} parameter groups")
+        print(f"  Loaded {len(mapped_state_dict)} CNN parameter groups (MLP excluded)")
 
     except FileNotFoundError:
         print(f"✗ Pretrained CNN not found at {pretrained_path}")
