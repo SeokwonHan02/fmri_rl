@@ -32,6 +32,49 @@ class DQN_CNN(nn.Module):
         return x
 
 
+class DQN(nn.Module):
+    """
+    Full DQN model (Nature DQN architecture)
+    Architecture: CNN (3 conv layers) -> FC (512) -> FC (action_dim)
+    """
+    def __init__(self, action_dim=6):
+        super(DQN, self).__init__()
+
+        self.action_dim = action_dim
+
+        # CNN layers
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+
+        # FC layers
+        self.fc3 = nn.Linear(3136, 512)
+        self.fc_out = nn.Linear(512, action_dim)
+
+    def forward(self, x):
+        # CNN forward
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)  # Flatten
+
+        # FC forward
+        x = torch.relu(self.fc3(x))
+        q_values = self.fc_out(x)
+        return q_values
+
+    def get_action(self, state, deterministic=True):
+        """Get action from state (compatible with eval.py)"""
+        if state.dim() == 3:
+            state = state.unsqueeze(0)
+
+        with torch.no_grad():
+            q_values = self.forward(state)
+            action = q_values.argmax(dim=-1)
+
+        return action.item() if action.numel() == 1 else action
+
+
 def load_pretrained_cnn(pretrained_path):
     cnn = DQN_CNN()
 
