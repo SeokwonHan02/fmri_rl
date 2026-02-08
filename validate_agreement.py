@@ -150,6 +150,9 @@ def validate_agreement(args):
     correct_counts = {name: 0 for name in models.keys()}
     total_samples = 0
 
+    # Collect human actions for histogram
+    human_action_counts = np.zeros(args.action_dim, dtype=np.int64)
+
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validating", ncols=80):
             # Prepare inputs
@@ -159,6 +162,10 @@ def validate_agreement(args):
             # Convert one-hot to index if needed
             if human_action.dim() == 2 and human_action.size(1) > 1:
                 human_action = human_action.argmax(dim=-1)
+
+            # Collect human action histogram
+            for action_idx in human_action.cpu().numpy():
+                human_action_counts[action_idx] += 1
 
             # Get predictions from each model
             for name, model in models.items():
@@ -184,11 +191,33 @@ def validate_agreement(args):
 
             total_samples += state.size(0)
 
-    # 5. Print results
+    # 5. Calculate baselines
+    most_frequent_action = human_action_counts.argmax()
+    most_frequent_count = human_action_counts[most_frequent_action]
+    most_frequent_baseline = most_frequent_count / total_samples * 100
+
+    # 6. Print action histogram
+    print("\n" + "="*80)
+    print("HUMAN ACTION DISTRIBUTION")
+    print("="*80)
+    action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
+    for action_idx in range(args.action_dim):
+        count = human_action_counts[action_idx]
+        percentage = count / total_samples * 100
+        bar = '█' * int(percentage / 2)  # Scale bar to fit screen
+        action_name = action_names[action_idx] if action_idx < len(action_names) else f'Action {action_idx}'
+        print(f"{action_name:12s} (Action {action_idx}): {count:6,} ({percentage:5.2f}%) {bar}")
+
+    print(f"\nMost Frequent Action: {action_names[most_frequent_action]} (Action {most_frequent_action})")
+    print(f"Most Frequent Baseline: {most_frequent_baseline:.2f}% (always predict most frequent)")
+    print("="*80)
+
+    # 7. Print results
     print("\n" + "="*80)
     print(f"VALIDATION RESULTS (Total samples: {total_samples:,})")
     print("="*80)
-    print(f"\nRandom Chance: {1/args.action_dim*100:.2f}%")
+    print(f"\nRandom Chance:           {1/args.action_dim*100:.2f}%")
+    print(f"Most Frequent Baseline:  {most_frequent_baseline:.2f}%")
     print("-"*80)
 
     # Sort results by accuracy
@@ -208,23 +237,24 @@ def validate_agreement(args):
 
     for name, accuracy, correct in results:
         display_name = model_names.get(name, name.upper())
-        print(f"{display_name:15s}: {accuracy:6.2f}%  ({correct:,}/{total_samples:,} correct)")
+        beats_baseline = "✓" if accuracy > most_frequent_baseline else "✗"
+        print(f"{display_name:15s}: {accuracy:6.2f}%  ({correct:,}/{total_samples:,} correct) [{beats_baseline}]")
 
     print("="*80)
 
-    # 6. Additional analysis
-    if len(results) > 1:
-        print("\nRelative Performance:")
-        print("-"*80)
-        baseline_acc = results[-1][1]  # Lowest accuracy
-        for name, accuracy, _ in results:
-            display_name = model_names.get(name, name.upper())
-            if accuracy == baseline_acc:
-                print(f"{display_name:15s}: Baseline")
-            else:
-                improvement = accuracy - baseline_acc
-                print(f"{display_name:15s}: +{improvement:.2f}% better than baseline")
-        print("="*80)
+    # 8. Additional analysis
+    print("\nPerformance vs. Most Frequent Baseline ({:.2f}%):".format(most_frequent_baseline))
+    print("-"*80)
+    for name, accuracy, _ in results:
+        display_name = model_names.get(name, name.upper())
+        diff = accuracy - most_frequent_baseline
+        if diff > 0:
+            print(f"{display_name:15s}: +{diff:.2f}% (BEATS baseline)")
+        elif diff < 0:
+            print(f"{display_name:15s}: {diff:.2f}% (below baseline)")
+        else:
+            print(f"{display_name:15s}: Same as baseline")
+    print("="*80)
 
 
 if __name__ == '__main__':
