@@ -26,6 +26,49 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def compute_class_weights(dataloader, action_dim=6, device='cpu'):
+    """
+    Compute class weights based on inverse frequency
+
+    Args:
+        dataloader: DataLoader to compute action distribution from
+        action_dim: Number of action classes
+        device: Device to put weights on
+
+    Returns:
+        torch.Tensor: Class weights for weighted cross-entropy loss
+    """
+    print("\nComputing class weights from action distribution...")
+    action_counts = torch.zeros(action_dim, dtype=torch.long)
+
+    for batch in dataloader:
+        action = batch['action']
+
+        # Convert one-hot to index if needed
+        if action.dim() == 2:
+            action_idx = action.argmax(dim=-1)
+        else:
+            action_idx = action
+
+        # Count each action
+        for a in action_idx:
+            action_counts[a] += 1
+
+    # Compute inverse frequency weights
+    total_samples = action_counts.sum().float()
+    class_weights = total_samples / (action_dim * action_counts.float())
+
+    # Print distribution
+    action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
+    print("\nAction Distribution:")
+    for i in range(action_dim):
+        name = action_names[i] if i < len(action_names) else f'Action {i}'
+        percentage = (action_counts[i].float() / total_samples * 100).item()
+        print(f"  {name:12s}: {action_counts[i]:6,} ({percentage:5.2f}%) - Weight: {class_weights[i]:.4f}")
+
+    return class_weights.to(device)
+
+
 def main():
     args = get_args()
     set_seed(args.seed)
@@ -56,7 +99,10 @@ def main():
     # Create model based on algorithm
     print(f"\nCreating {args.algo.upper()} model...")
 
+    # Compute class weights for BC (to handle class imbalance)
+    class_weights = None
     if args.algo == 'bc':
+        class_weights = compute_class_weights(train_loader, action_dim=6, device=device)
         model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
         train_fn = train_bc
         val_fn = val_bc
@@ -101,8 +147,8 @@ def main():
 
         # ===== TRAINING =====
         if args.algo == 'bc':
-            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler, args.label_smoothing)
-            val_loss, val_accuracy = val_fn(model, val_loader, device, args.label_smoothing)
+            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler, args.label_smoothing, class_weights)
+            val_loss, val_accuracy = val_fn(model, val_loader, device, args.label_smoothing, class_weights)
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"

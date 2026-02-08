@@ -63,8 +63,7 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
     total_q_value = 0
     total_samples = 0
 
-    pbar = tqdm(dataloader, desc="Training CQL", leave=False)
-    for batch in pbar:
+    for batch in dataloader:
         step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
@@ -121,14 +120,6 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         total_loss_sum += total_loss.item() * state.size(0)
         total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
-
-        # Update progress bar
-        pbar.set_postfix({
-            'td_loss': f'{td_loss.item():.4f}',
-            'cql_loss': f'{cql_loss.item():.4f}',
-            'total': f'{total_loss.item():.4f}',
-            'avg_q': f'{q_values.mean().item():.2f}'
-        })
 
     avg_td_loss = total_td_loss / total_samples
     avg_cql_loss = total_cql_loss / total_samples

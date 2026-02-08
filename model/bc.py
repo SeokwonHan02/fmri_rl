@@ -47,14 +47,13 @@ class BehaviorCloning(nn.Module):
         return action.item() if action.numel() == 1 else action
 
 
-def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothing=0.0):
+def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothing=0.0, class_weights=None):
     model.train()
     total_loss = 0
     total_correct = 0
     total_samples = 0
 
-    pbar = tqdm(dataloader, desc="Training BC", leave=False)
-    for batch in pbar:
+    for batch in dataloader:
         state = batch['state'].to(device).float() / 255.0  # Normalize to [0, 1]
         action = batch['action'].to(device)
 
@@ -65,8 +64,8 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothi
         # Forward pass
         logits = model(state)
 
-        # Compute cross-entropy loss with label smoothing
-        loss = F.cross_entropy(logits, action, label_smoothing=label_smoothing)
+        # Compute cross-entropy loss with label smoothing and class weights
+        loss = F.cross_entropy(logits, action, weight=class_weights, label_smoothing=label_smoothing)
 
         # Backward pass
         optimizer.zero_grad()
@@ -85,19 +84,13 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothi
         total_correct += (pred == action).sum().item()
         total_samples += state.size(0)
 
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'acc': f'{(pred == action).float().mean().item():.4f}'
-        })
-
     avg_loss = total_loss / total_samples
     avg_accuracy = total_correct / total_samples
 
     return avg_loss, avg_accuracy
 
 
-def val_bc(model, dataloader, device, label_smoothing=0.0):
+def val_bc(model, dataloader, device, label_smoothing=0.0, class_weights=None):
     """Validation function for Behavior Cloning"""
     model.eval()
     total_loss = 0
@@ -116,8 +109,8 @@ def val_bc(model, dataloader, device, label_smoothing=0.0):
             # Forward pass
             logits = model(state)
 
-            # Compute cross-entropy loss with label smoothing
-            loss = F.cross_entropy(logits, action, label_smoothing=label_smoothing)
+            # Compute cross-entropy loss with label smoothing and class weights
+            loss = F.cross_entropy(logits, action, weight=class_weights, label_smoothing=label_smoothing)
 
             # Statistics
             total_loss += loss.item() * state.size(0)

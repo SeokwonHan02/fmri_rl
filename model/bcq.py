@@ -113,8 +113,7 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
     total_q_value = 0
     total_samples = 0
 
-    pbar = tqdm(dataloader, desc="Training BCQ", leave=False)
-    for batch in pbar:
+    for batch in dataloader:
         step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
@@ -187,14 +186,6 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         total_bc_correct += (pred == action_idx).sum().item()
         total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
-
-        # Update progress bar
-        pbar.set_postfix({
-            'q_loss': f'{q_loss.item():.4f}',
-            'bc_loss': f'{bc_loss.item():.4f}',
-            'bc_acc': f'{(pred == action_idx).float().mean().item():.4f}',
-            'avg_q': f'{q_values.mean().item():.2f}'
-        })
 
     avg_q_loss = total_q_loss / total_samples
     avg_bc_loss = total_bc_loss / total_samples
