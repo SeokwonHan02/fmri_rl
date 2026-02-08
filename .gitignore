@@ -7,3 +7,5 @@ pretrained/
 *.err
 *.out
 *.slurm
+
+experiments/

@@ -14,7 +14,7 @@ def get_args():
     parser.add_argument('--subject', type=str, default='sub_1',
                         choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'],
                         help='Which subject data to use')
-    parser.add_argument('--batch-size', type=int, default=256,
+    parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for training')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
