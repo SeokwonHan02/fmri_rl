@@ -51,13 +51,15 @@ def get_args():
                         help='Label smoothing for BC loss (0.0 = no smoothing)')
     parser.add_argument('--logit-div', type=float, default=2.0,
                         help='Logit division for temperature scaling')
+    parser.add_argument('--class-weight-exponent', type=float, default=0.5,
+                        help='Exponent for class weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)')
 
     # Logging and saving
     parser.add_argument('--save-dir', type=str, default='/Users/seokwon/research/fMRI_RL/checkpoints',
                         help='Directory to save model checkpoints')
     parser.add_argument('--log-interval', type=int, default=100,
                         help='Logging interval (steps)')
-    parser.add_argument('--save-interval', type=int, default=10,
+    parser.add_argument('--save-interval', type=int, default=1,
                         help='Model saving interval (epochs)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')

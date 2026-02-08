@@ -26,7 +26,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def compute_class_weights(dataloader, action_dim=6, device='cpu'):
+def compute_class_weights(dataloader, action_dim=6, device='cpu', exponent=1.0):
     """
     Compute class weights based on inverse frequency
 
@@ -34,11 +34,12 @@ def compute_class_weights(dataloader, action_dim=6, device='cpu'):
         dataloader: DataLoader to compute action distribution from
         action_dim: Number of action classes
         device: Device to put weights on
+        exponent: Exponent to apply to weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)
 
     Returns:
         torch.Tensor: Class weights for weighted cross-entropy loss
     """
-    print("\nComputing class weights from action distribution...")
+    print(f"\nComputing class weights from action distribution (exponent={exponent})...")
     action_counts = torch.zeros(action_dim, dtype=torch.long)
 
     for batch in dataloader:
@@ -54,9 +55,16 @@ def compute_class_weights(dataloader, action_dim=6, device='cpu'):
         for a in action_idx:
             action_counts[a] += 1
 
-    # Compute inverse frequency weights
+    # Compute inverse frequency weights with exponent
     total_samples = action_counts.sum().float()
-    class_weights = total_samples / (action_dim * action_counts.float())
+
+    if exponent == 0.0:
+        # No weighting - all weights are 1
+        class_weights = torch.ones(action_dim)
+    else:
+        # Apply exponent to inverse frequency weights
+        raw_weights = total_samples / (action_dim * action_counts.float())
+        class_weights = raw_weights ** exponent
 
     # Print distribution
     action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
@@ -102,7 +110,7 @@ def main():
     # Compute class weights for BC (to handle class imbalance)
     class_weights = None
     if args.algo == 'bc':
-        class_weights = compute_class_weights(train_loader, action_dim=6, device=device)
+        class_weights = compute_class_weights(train_loader, action_dim=6, device=device, exponent=args.class_weight_exponent)
         model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
         train_fn = train_bc
         val_fn = val_bc
@@ -156,8 +164,10 @@ def main():
                 f"  Val   - Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}"
             )
 
-            # Save model for this epoch
-            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+            # Save model every save_interval epochs
+            if epoch % args.save_interval == 0:
+                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'bcq':
             train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q, step = train_fn(
@@ -174,8 +184,10 @@ def main():
                 f"  Val   - Q Loss: {val_q_loss:.4f}, BC Loss: {val_bc_loss:.4f}, BC Acc: {val_bc_accuracy:.4f}, Avg Q: {val_avg_q:.2f}"
             )
 
-            # Save model for this epoch
-            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+            # Save model every save_interval epochs
+            if epoch % args.save_interval == 0:
+                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'cql':
             train_td_loss, train_cql_loss, train_total_loss, train_avg_q, step = train_fn(
@@ -192,10 +204,10 @@ def main():
                 f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}"
             )
 
-            # Save model for this epoch
-            torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
-
-        tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
+            # Save model every save_interval epochs
+            if epoch % args.save_interval == 0:
+                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         # ===== EVALUATION =====
         if epoch % args.eval_interval == 0:
