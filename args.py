@@ -43,6 +43,8 @@ def get_args():
     # BCQ specific
     parser.add_argument('--bcq-threshold', type=float, default=0.3,
                         help='BCQ action filtering threshold')
+    parser.add_argument('--bc-path', type=str, default='',
+                        help='Path to pretrained BC model (if provided, BC network will be frozen)')
 
     # BC and BCQ behavior cloning
     parser.add_argument('--label-smoothing', type=float, default=0.1,

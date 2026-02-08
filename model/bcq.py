@@ -15,12 +15,13 @@ class BCQ(nn.Module):
     2. Imitation network: Learns behavior policy (3136 -> 512 -> 6)
     3. Target Q-network: For stable Q-learning
     """
-    def __init__(self, cnn, action_dim=6, threshold=0.3, logit_div=1.0):
+    def __init__(self, cnn, action_dim=6, threshold=0.3, logit_div=1.0, bc_path=''):
         super(BCQ, self).__init__()
 
         self.action_dim = action_dim
         self.threshold = threshold
         self.logit_div = logit_div
+        self.bc_frozen = (bc_path != '')  # Track if BC network is frozen
 
         # Frozen CNN (pretrained)
         self.cnn = cnn
@@ -32,12 +33,33 @@ class BCQ(nn.Module):
             nn.Linear(512, action_dim)
         )
 
-        # Imitation network: 3136 -> 512 -> 6 (randomly initialized)
+        # Imitation network: 3136 -> 512 -> 6
         self.imitation_network = nn.Sequential(
             nn.Linear(3136, 512),
             nn.ReLU(),
             nn.Linear(512, action_dim)
         )
+
+        # Load pretrained BC model if provided
+        if bc_path:
+            print(f"Loading pretrained BC model from: {bc_path}")
+            from .bc import BehaviorCloning
+
+            # Load pretrained BC model
+            bc_state_dict = torch.load(bc_path, map_location='cpu')
+
+            # Create temporary BC model to extract action_head weights
+            temp_bc = BehaviorCloning(cnn, action_dim=action_dim, logit_div=logit_div)
+            temp_bc.load_state_dict(bc_state_dict)
+
+            # Copy weights from BC's action_head to imitation_network
+            self.imitation_network.load_state_dict(temp_bc.action_head.state_dict())
+
+            # Freeze imitation network
+            for param in self.imitation_network.parameters():
+                param.requires_grad = False
+
+            print("BC network loaded and frozen")
 
         # Target Q-network (CNN is frozen)
         self.q_network_target = copy.deepcopy(self.q_network)
@@ -136,11 +158,13 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         # Q-learning loss (Huber loss for stability)
         q_loss = F.smooth_l1_loss(q_value, target_q)
 
-        # Behavior cloning loss with label smoothing
-        bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
-
-        # Combined loss (CNN is frozen, Q and Imitation heads are separate)
-        total_loss = q_loss + bc_loss
+        # Behavior cloning loss with label smoothing (only if BC is not frozen)
+        if model.bc_frozen:
+            bc_loss = torch.tensor(0.0, device=q_loss.device)
+            total_loss = q_loss
+        else:
+            bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
+            total_loss = q_loss + bc_loss
 
         # Single backward and optimizer step
         optimizer.zero_grad()
@@ -231,8 +255,11 @@ def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0):
             # Q-learning loss
             q_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # Behavior cloning loss with label smoothing
-            bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
+            # Behavior cloning loss with label smoothing (only if BC is not frozen)
+            if model.bc_frozen:
+                bc_loss = torch.tensor(0.0, device=q_loss.device)
+            else:
+                bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
 
             # Statistics
             total_q_loss += q_loss.item() * state.size(0)

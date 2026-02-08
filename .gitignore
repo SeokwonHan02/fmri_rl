@@ -4,3 +4,6 @@ checkpoints/
 __pycache__/
 processed_data/
 pretrained/
+*.err
+*.out
+*.slurm

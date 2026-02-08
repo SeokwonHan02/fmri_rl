@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument('--env-name', type=str,
                         default='ALE/SpaceInvaders-v5',
                         help='Environment name')
-    parser.add_argument('--num-episodes', type=int, default=10,
+    parser.add_argument('--num-episodes', type=int, default=100,
                         help='Number of episodes to evaluate')
     parser.add_argument('--action-dim', type=int, default=6,
                         help='Action dimension')

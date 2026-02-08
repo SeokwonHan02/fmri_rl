@@ -62,7 +62,7 @@ def main():
         val_fn = val_bc
 
     elif args.algo == 'bcq':
-        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div)
+        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div, bc_path=args.bc_path)
         train_fn = train_bcq
         val_fn = val_bcq
 
