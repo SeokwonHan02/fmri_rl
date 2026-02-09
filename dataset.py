@@ -71,8 +71,24 @@ class OfflineRLDataset(Dataset):
 
     def __getitem__(self, idx):
         # Transpose state from (H, W, C) to (C, H, W) for PyTorch
-        state = torch.from_numpy(self.states[idx]).permute(2, 0, 1)  # (84, 84, 4) -> (4, 84, 84)
-        next_state = torch.from_numpy(self.next_states[idx]).permute(2, 0, 1)  # (84, 84, 4) -> (4, 84, 84)
+        state = torch.from_numpy(self.states[idx])
+        next_state = torch.from_numpy(self.next_states[idx])
+
+        # Handle different input formats robustly
+        # Expected: (84, 84, 4) -> (4, 84, 84)
+        if state.shape == (84, 84, 4):
+            state = state.permute(2, 0, 1)
+        elif state.shape == (4, 84, 84):
+            pass  # Already in correct format
+        else:
+            raise ValueError(f"Unexpected state shape: {state.shape}. Expected (84, 84, 4) or (4, 84, 84)")
+
+        if next_state.shape == (84, 84, 4):
+            next_state = next_state.permute(2, 0, 1)
+        elif next_state.shape == (4, 84, 84):
+            pass
+        else:
+            raise ValueError(f"Unexpected next_state shape: {next_state.shape}")
 
         # Convert action to appropriate type
         action = torch.from_numpy(self.actions[idx])
