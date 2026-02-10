@@ -69,7 +69,7 @@ def get_args():
                         help='Device to use (cuda or cpu)')
 
     # Evaluation
-    parser.add_argument('--env-name', type=str, default='ALE/SpaceInvaders-v5',
+    parser.add_argument('--env-name', type=str, default='SpaceInvadersNoFrameskip-v4',
                         help='Environment name for evaluation')
     parser.add_argument('--eval-episodes', type=int, default=10,
                         help='Number of episodes to run for evaluation')

@@ -13,17 +13,16 @@ except Exception as e:
     print(f"Warning: Failed to register ALE environments: {e}")
 
 
-def make_atari_env(env_name='ALE/SpaceInvaders-v5', seed=0):
+def make_atari_env(env_name='SpaceInvadersNoFrameskip-v4', seed=0):
     """Create Atari environment with standard preprocessing"""
     # Create environment (rgb_array for headless server environments)
     env = gym.make(env_name, render_mode='rgb_array')
 
     # Atari preprocessing: grayscale, resize, etc.
-    # Note: ALE/SpaceInvaders-v5 already includes frameskip=4 by default
     env = AtariPreprocessing(
         env,
         noop_max=30,
-        frame_skip=1,  # Already handled by ALE
+        frame_skip=4,  # Apply frame skip of 4
         screen_size=84,
         terminal_on_life_loss=False,
         grayscale_obs=True,

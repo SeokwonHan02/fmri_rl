@@ -26,7 +26,7 @@ def get_args():
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
                         help='Path to pretrained DQN checkpoint')
     parser.add_argument('--env-name', type=str,
-                        default='ALE/SpaceInvaders-v5',
+                        default='SpaceInvadersNoFrameskip-v4',
                         help='Environment name')
     parser.add_argument('--num-episodes', type=int, default=10,
                         help='Number of episodes to evaluate')
@@ -40,7 +40,7 @@ def get_args():
                         help='Terminate episode on life loss (standard for training)')
 
     # Agreement validation options
-    parser.add_argument('--validate-agreement', action='store_true', default=True,
+    parser.add_argument('--validate-agreement', action='store_true', default=False,
                         help='Run agreement validation against human data instead of environment evaluation')
     parser.add_argument('--data-dir', type=str,
                         default='/Users/seokwon/research/fMRI_RL/processed_data',
@@ -88,14 +88,14 @@ def load_dqn(checkpoint_path, action_dim, device):
     return model
 
 
-def make_atari_env(env_name='ALE/SpaceInvaders-v5', seed=0, terminal_on_life_loss=False):
+def make_atari_env(env_name='SpaceInvadersNoFrameskip-v4', seed=0, terminal_on_life_loss=False):
     """Create Atari environment with standard preprocessing"""
-    env = gym.make(env_name, frameskip=1, render_mode='rgb_array')  # frameskip=1 추가!
-    
+    env = gym.make(env_name, render_mode='rgb_array')
+
     env = AtariPreprocessing(
         env,
         noop_max=30,
-        frame_skip=1,
+        frame_skip=4,  # Apply frame skip of 4
         screen_size=84,
         terminal_on_life_loss=terminal_on_life_loss,
         grayscale_obs=True,
