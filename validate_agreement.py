@@ -8,6 +8,29 @@ from dataset import create_train_val_dataloaders
 from model import load_pretrained_cnn, BCQ, CQL, BehaviorCloning
 
 
+def action_to_fire_move(action):
+    """
+    Convert action index to fire and move labels
+
+    Action mapping:
+    - 0: NOOP       -> fire=0, move=0
+    - 1: FIRE       -> fire=1, move=0
+    - 2: RIGHT      -> fire=0, move=1
+    - 3: LEFT       -> fire=0, move=2
+    - 4: RIGHT+FIRE -> fire=1, move=1
+    - 5: LEFT+FIRE  -> fire=1, move=2
+    """
+    # Fire mapping: 0->0, 1->1, 2->0, 3->0, 4->1, 5->1
+    fire_map = torch.tensor([0, 1, 0, 0, 1, 1], dtype=torch.long, device=action.device)
+    fire_label = fire_map[action]
+
+    # Move mapping: 0->0, 1->0, 2->1, 3->2, 4->1, 5->2
+    move_map = torch.tensor([0, 0, 1, 2, 1, 2], dtype=torch.long, device=action.device)
+    move_label = move_map[action]
+
+    return fire_label, move_label
+
+
 def get_validation_args():
     parser = argparse.ArgumentParser(description='Validate model agreement with human actions')
 
@@ -149,10 +172,14 @@ def validate_agreement(args):
     # Initialize counters
     correct_counts = {name: 0 for name in models.keys()}
     per_action_correct = {name: np.zeros(args.action_dim, dtype=np.int64) for name in models.keys()}
+    per_fire_correct = {name: np.zeros(2, dtype=np.int64) for name in models.keys()}  # Fire: No(0), Yes(1)
+    per_move_correct = {name: np.zeros(3, dtype=np.int64) for name in models.keys()}  # Move: No(0), Right(1), Left(2)
     total_samples = 0
 
     # Collect human actions for histogram
     human_action_counts = np.zeros(args.action_dim, dtype=np.int64)
+    fire_counts = np.zeros(2, dtype=np.int64)  # Fire distribution
+    move_counts = np.zeros(3, dtype=np.int64)  # Move distribution
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validating", ncols=80):
@@ -167,6 +194,13 @@ def validate_agreement(args):
             # Collect human action histogram
             for action_idx in human_action.cpu().numpy():
                 human_action_counts[action_idx] += 1
+
+            # Decompose human actions into fire and move
+            human_fire, human_move = action_to_fire_move(human_action)
+            for f in human_fire.cpu().numpy():
+                fire_counts[f] += 1
+            for m in human_move.cpu().numpy():
+                move_counts[m] += 1
 
             # Get predictions from each model
             for name, model in models.items():
@@ -191,6 +225,21 @@ def validate_agreement(args):
                     for action_idx in range(args.action_dim):
                         action_mask = (human_action == action_idx)
                         per_action_correct[name][action_idx] += (matches & action_mask).sum().item()
+
+                    # Decompose predictions into fire and move
+                    pred_fire, pred_move = action_to_fire_move(pred)
+
+                    # Count fire matches
+                    fire_matches = (pred_fire == human_fire)
+                    for fire_idx in range(2):
+                        fire_mask = (human_fire == fire_idx)
+                        per_fire_correct[name][fire_idx] += (fire_matches & fire_mask).sum().item()
+
+                    # Count move matches
+                    move_matches = (pred_move == human_move)
+                    for move_idx in range(3):
+                        move_mask = (human_move == move_idx)
+                        per_move_correct[name][move_idx] += (move_matches & move_mask).sum().item()
 
                 except Exception as e:
                     print(f"\n  ⚠️  Error with {name.upper()}: {e}")
@@ -284,6 +333,86 @@ def validate_agreement(args):
 
         print("-"*80)
         print(f"{'OVERALL':<15s} {total_samples:>8,} {correct_counts[name]:>8,} {accuracy:>9.2f}%")
+
+    print("="*80)
+
+    # 9. Fire vs No Fire accuracy
+    print("\n" + "="*80)
+    print("FIRE VS NO FIRE ACCURACY (Binary Classification)")
+    print("="*80)
+
+    fire_names = ['No Fire', 'Fire']
+    print(f"\n{'Fire Label':<15s} {'Count':>8s} {'Percentage':>12s}")
+    print("-"*80)
+    for fire_idx in range(2):
+        count = fire_counts[fire_idx]
+        percentage = count / total_samples * 100
+        print(f"{fire_names[fire_idx]:<15s} {count:>8,} {percentage:>11.2f}%")
+
+    for name, _, _ in results:
+        display_name = model_names.get(name, name.upper())
+        print(f"\n{display_name}:")
+        print("-"*80)
+        print(f"{'Fire Label':<15s} {'Count':>8s} {'Correct':>8s} {'Accuracy':>10s} {'Bar':>20s}")
+        print("-"*80)
+
+        fire_total_correct = 0
+        for fire_idx in range(2):
+            count = fire_counts[fire_idx]
+            correct = per_fire_correct[name][fire_idx]
+            fire_total_correct += correct
+
+            if count > 0:
+                fire_acc = correct / count * 100
+                bar_length = int(fire_acc / 5)
+                bar = '█' * bar_length
+                print(f"{fire_names[fire_idx]:<15s} {count:>8,} {correct:>8,} {fire_acc:>9.2f}% {bar:>20s}")
+            else:
+                print(f"{fire_names[fire_idx]:<15s} {count:>8,} {correct:>8,} {'N/A':>10s}")
+
+        overall_fire_acc = fire_total_correct / total_samples * 100
+        print("-"*80)
+        print(f"{'OVERALL':<15s} {total_samples:>8,} {fire_total_correct:>8,} {overall_fire_acc:>9.2f}%")
+
+    print("="*80)
+
+    # 10. Move (No Move / Right / Left) accuracy
+    print("\n" + "="*80)
+    print("MOVE ACCURACY (3-Way Classification: NOOP/RIGHT/LEFT)")
+    print("="*80)
+
+    move_names = ['No Move', 'Right', 'Left']
+    print(f"\n{'Move Label':<15s} {'Count':>8s} {'Percentage':>12s}")
+    print("-"*80)
+    for move_idx in range(3):
+        count = move_counts[move_idx]
+        percentage = count / total_samples * 100
+        print(f"{move_names[move_idx]:<15s} {count:>8,} {percentage:>11.2f}%")
+
+    for name, _, _ in results:
+        display_name = model_names.get(name, name.upper())
+        print(f"\n{display_name}:")
+        print("-"*80)
+        print(f"{'Move Label':<15s} {'Count':>8s} {'Correct':>8s} {'Accuracy':>10s} {'Bar':>20s}")
+        print("-"*80)
+
+        move_total_correct = 0
+        for move_idx in range(3):
+            count = move_counts[move_idx]
+            correct = per_move_correct[name][move_idx]
+            move_total_correct += correct
+
+            if count > 0:
+                move_acc = correct / count * 100
+                bar_length = int(move_acc / 5)
+                bar = '█' * bar_length
+                print(f"{move_names[move_idx]:<15s} {count:>8,} {correct:>8,} {move_acc:>9.2f}% {bar:>20s}")
+            else:
+                print(f"{move_names[move_idx]:<15s} {count:>8,} {correct:>8,} {'N/A':>10s}")
+
+        overall_move_acc = move_total_correct / total_samples * 100
+        print("-"*80)
+        print(f"{'OVERALL':<15s} {total_samples:>8,} {move_total_correct:>8,} {overall_move_acc:>9.2f}%")
 
     print("="*80)
 
