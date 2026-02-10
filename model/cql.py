@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
-from .dqn import DQN_CNN
 import copy
 
 class CQL(nn.Module):
@@ -13,18 +11,31 @@ class CQL(nn.Module):
     Adds a conservative regularization term to standard Q-learning
     to prevent overestimation of out-of-distribution actions
     """
-    def __init__(self, cnn, action_dim=6, alpha=1.0):
+    def __init__(self, cnn, action_dim=6, alpha=1.0, freeze_encoder=True, freeze_conv12_only=False):
         super(CQL, self).__init__()
 
         self.action_dim = action_dim
         self.alpha = alpha  # CQL regularization weight
 
-        # Frozen CNN (pretrained)
+        # CNN with configurable freeze options
         self.cnn = cnn
 
-        # CRITICAL: Ensure CNN is frozen to prevent target instability
-        for param in self.cnn.parameters():
-            param.requires_grad = False
+        # Freeze CNN based on options (default: freeze entire CNN for stability)
+        if freeze_encoder:
+            # Freeze entire CNN (recommended for stability)
+            for param in self.cnn.parameters():
+                param.requires_grad = False
+            print("✓ CQL CNN: All conv layers frozen")
+        elif freeze_conv12_only:
+            # Freeze Conv1 and Conv2, keep Conv3 trainable
+            for param in self.cnn.cnn[0].parameters():  # Conv1
+                param.requires_grad = False
+            for param in self.cnn.cnn[2].parameters():  # Conv2
+                param.requires_grad = False
+            print("✓ CQL CNN: Conv1 and Conv2 frozen, Conv3 trainable")
+        else:
+            # All CNN trainable (use with caution - may cause instability)
+            print("✓ CQL CNN: All conv layers trainable")
 
         # Q-network: 3136 -> 512 -> 6 (randomly initialized)
         self.q_network = nn.Sequential(
@@ -62,7 +73,7 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=1000):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1):
     model.train()
     total_td_loss = 0
     total_cql_loss = 0
@@ -74,7 +85,8 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         model.training_step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
-        reward = batch['reward'].to(device).float() / 10.0  # Reward scaling
+        # FIX BUG #7: Parameterized reward scaling (same as BCQ)
+        reward = batch['reward'].to(device).float() * reward_scale
         next_state = batch['next_state'].to(device).float() / 255.0
         done = batch['done'].to(device).float()
 
@@ -112,7 +124,11 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         logsumexp_q = torch.logsumexp(q_values, dim=1)
         cql_loss = (logsumexp_q - q_value).mean()
 
-        # Total loss
+        # Total loss: TD loss + CQL regularization
+        # FIX BUG #3: Alpha should be 0.1-0.5 for discrete actions (was 1.0, too high)
+        # CQL term penalizes unseen actions to prevent overestimation
+        # If alpha too high, Q-values collapse to zero (over-conservative)
+        # If alpha too low, overfitting to in-distribution actions
         total_loss = td_loss + model.alpha * cql_loss
 
         # Backward pass
@@ -122,7 +138,11 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
-        # Update target network
+        # Update target network periodically for stable Q-learning
+        # FIX BUG #2: Reduced default from 1000 to 100 for offline RL stability
+        # Too high = stale targets, training instability
+        # Too low = moving target, slow convergence
+        # Typical range: 100-250 for offline settings
         if model.training_step % target_update_freq == 0:
             model.update_target()
 
@@ -141,7 +161,7 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
     return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
 
 
-def val_cql(model, dataloader, device, gamma=0.99):
+def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1):
     """Validation function for CQL with detailed metrics"""
     model.eval()
     total_td_loss = 0
@@ -154,7 +174,7 @@ def val_cql(model, dataloader, device, gamma=0.99):
         for batch in dataloader:
             state = batch['state'].to(device).float() / 255.0
             action = batch['action'].to(device)
-            reward = batch['reward'].to(device).float() / 10.0  # Reward scaling
+            reward = batch['reward'].to(device).float() * reward_scale
             next_state = batch['next_state'].to(device).float() / 255.0
             done = batch['done'].to(device).float()
 

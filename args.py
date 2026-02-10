@@ -26,7 +26,7 @@ def get_args():
     parser.add_argument('--freeze-encoder', action='store_true',
                         help='Freeze entire DQN encoder (all conv layers)')
     parser.add_argument('--freeze-conv12-only', action='store_true',
-                        help='Freeze only Conv1 and Conv2, unfreeze Conv3 (recommended for BC)')
+                        help='Freeze only Conv1 and Conv2, unfreeze Conv3')
     parser.add_argument('--encoder-lr', type=float, default=1e-5,
                         help='Learning rate for encoder when not frozen')
 
@@ -37,26 +37,37 @@ def get_args():
                         help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount factor for RL')
+    parser.add_argument('--reward-scale', type=float, default=0.1,
+                        help='Reward scaling factor')
 
     # CQL specific
-    parser.add_argument('--cql-alpha', type=float, default=1.0,
+    parser.add_argument('--cql-alpha', type=float, default=0.2,
                         help='CQL regularization weight')
-    parser.add_argument('--target-update-freq', type=int, default=1000,
+    parser.add_argument('--target-update-freq', type=int, default=100,
                         help='Target network update frequency')
 
     # BCQ specific
     parser.add_argument('--bcq-threshold', type=float, default=0.3,
                         help='BCQ action filtering threshold')
     parser.add_argument('--bc-path', type=str, default='',
-                        help='Path to pretrained BC model (if provided, BC network will be frozen)')
+                        help='Path to pretrained BC model for BCQ initialization')
+    parser.add_argument('--bcq-freeze-bc', action='store_true',
+                        help='Freeze BC network in BCQ (default: False, allow BC to continue learning)')
+    parser.add_argument('--bcq-bc-weight', type=float, default=5.0,
+                        help='Weight for BC loss in BCQ (relative to Q loss). '
+                             'Typical Q loss: 1-5, BC loss: 0.1-0.5, so use 5-10 to balance. '
+                             'Set to 0 to disable BC loss (pure Q-learning with BC constraint).')
 
     # BC and BCQ behavior cloning
     parser.add_argument('--label-smoothing', type=float, default=0.0,
                         help='Label smoothing for BC loss (0.0 = no smoothing)')
-    parser.add_argument('--logit-div', type=float, default=2.0,
-                        help='Logit division for temperature scaling')
     parser.add_argument('--class-weight-exponent', type=float, default=0.5,
                         help='Exponent for class weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)')
+    parser.add_argument('--fire-loss-weight', type=float, default=1.5,
+                        help='Weight for fire loss in BC (to balance with move loss). '
+                             'Default 1.5 since fire has fewer classes than move.')
+    parser.add_argument('--move-loss-weight', type=float, default=1.0,
+                        help='Weight for move loss in BC.')
     parser.add_argument('--deterministic', action='store_true', default=True,
                         help='Use deterministic action selection during evaluation (default: True)')
     parser.add_argument('--stochastic', dest='deterministic', action='store_false',

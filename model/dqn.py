@@ -127,7 +127,7 @@ def load_pretrained_cnn(pretrained_path, freeze=True, freeze_conv12_only=False):
             param.requires_grad = False
         for param in cnn.cnn[2].parameters():  # Conv2
             param.requires_grad = False
-        print(f"✓ Conv1 and Conv2 frozen, Conv3 trainable (recommended for BC)")
+        print(f"✓ Conv1 and Conv2 frozen, Conv3 trainable")
     else:
         print(f"✓ CNN unfrozen (all conv layers trainable)")
 

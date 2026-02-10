@@ -18,7 +18,6 @@ from eval import evaluate_agent
 
 
 def set_seed(seed):
-    """Set random seed for reproducibility"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -27,70 +26,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def compute_class_weights(dataloader, action_dim=6, device='cpu', exponent=1.0):
-    """
-    Compute class weights based on inverse frequency
-
-    Args:
-        dataloader: DataLoader to compute action distribution from
-        action_dim: Number of action classes
-        device: Device to put weights on
-        exponent: Exponent to apply to weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)
-
-    Returns:
-        torch.Tensor: Class weights for weighted cross-entropy loss
-    """
-    print(f"\nComputing class weights from action distribution (exponent={exponent})...")
-    action_counts = torch.zeros(action_dim, dtype=torch.long)
-
-    for batch in dataloader:
-        action = batch['action']
-
-        # Convert one-hot to index if needed
-        if action.dim() == 2:
-            action_idx = action.argmax(dim=-1)
-        else:
-            action_idx = action
-
-        # Count each action
-        for a in action_idx:
-            action_counts[a] += 1
-
-    # Compute inverse frequency weights with exponent
-    total_samples = action_counts.sum().float()
-
-    if exponent == 0.0:
-        # No weighting - all weights are 1
-        class_weights = torch.ones(action_dim)
-    else:
-        # Apply exponent to inverse frequency weights
-        raw_weights = total_samples / (action_dim * action_counts.float())
-        class_weights = raw_weights ** exponent
-
-    # Print distribution
-    action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
-    print("\nAction Distribution:")
-    for i in range(action_dim):
-        name = action_names[i] if i < len(action_names) else f'Action {i}'
-        percentage = (action_counts[i].float() / total_samples * 100).item()
-        print(f"  {name:12s}: {action_counts[i]:6,} ({percentage:5.2f}%) - Weight: {class_weights[i]:.4f}")
-
-    return class_weights.to(device)
-
-
-def compute_fire_move_weights(dataloader, device='cpu', exponent=1.0):
-    """
-    Compute class weights for fire and move based on inverse frequency
-
-    Args:
-        dataloader: DataLoader to compute action distribution from
-        device: Device to put weights on
-        exponent: Exponent to apply to weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)
-
-    Returns:
-        fire_weights: Tensor of shape (2,) for fire classes
-        move_weights: Tensor of shape (3,) for move classes
-    """
+def compute_fire_move_weights(dataloader, device='cpu', exponent=0.5):
     from model.bc import action_to_fire_move
 
     print(f"\nComputing fire/move class weights from action distribution (exponent={exponent})...")
@@ -185,7 +121,7 @@ def main():
     print(f"\nCreating {args.algo.upper()} model...")
 
     if args.algo == 'bc':
-        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
+        model = BehaviorCloning(cnn, action_dim=6)
         train_fn = train_bc
         val_fn = val_bc
         print("BC Loss: Fire Binary CE + Move 3-class CE")
@@ -200,12 +136,15 @@ def main():
             print("\nNo class weighting (exponent=0.0)")
 
     elif args.algo == 'bcq':
-        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div, bc_path=args.bc_path)
+        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold,
+                    bc_path=args.bc_path, freeze_bc=args.bcq_freeze_bc, bc_weight=args.bcq_bc_weight,
+                    freeze_encoder=args.freeze_encoder, freeze_conv12_only=args.freeze_conv12_only)
         train_fn = train_bcq
         val_fn = val_bcq
 
     elif args.algo == 'cql':
-        model = CQL(cnn, action_dim=6, alpha=args.cql_alpha)
+        model = CQL(cnn, action_dim=6, alpha=args.cql_alpha,
+                    freeze_encoder=args.freeze_encoder, freeze_conv12_only=args.freeze_conv12_only)
         train_fn = train_cql
         val_fn = val_cql
 
@@ -253,10 +192,12 @@ def main():
         # ===== TRAINING =====
         if args.algo == 'bc':
             train_loss, train_acc, train_fire_loss, train_move_loss, train_fire_acc, train_move_acc = train_fn(
-                model, train_loader, optimizer, device, args.label_smoothing, fire_weights, move_weights
+                model, train_loader, optimizer, device, args.label_smoothing, fire_weights, move_weights,
+                args.fire_loss_weight, args.move_loss_weight
             )
             val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc = val_fn(
-                model, val_loader, device, args.label_smoothing, fire_weights, move_weights
+                model, val_loader, device, args.label_smoothing, fire_weights, move_weights,
+                args.fire_loss_weight, args.move_loss_weight
             )
 
             tqdm.write(
@@ -276,11 +217,12 @@ def main():
 
         elif args.algo == 'bcq':
             train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q = train_fn(
-                model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.label_smoothing
+                model, train_loader, optimizer, device, args.gamma, args.target_update_freq,
+                args.label_smoothing, args.reward_scale
             )
 
             val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
-                model, val_loader, device, args.gamma, args.label_smoothing
+                model, val_loader, device, args.gamma, args.label_smoothing, args.reward_scale
             )
 
             tqdm.write(
@@ -296,11 +238,11 @@ def main():
 
         elif args.algo == 'cql':
             train_td_loss, train_cql_loss, train_total_loss, train_avg_q = train_fn(
-                model, train_loader, optimizer, device, args.gamma, args.target_update_freq
+                model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
             val_td_loss, val_cql_loss, val_total_loss, val_avg_q = val_cql(
-                model, val_loader, device, args.gamma
+                model, val_loader, device, args.gamma, args.reward_scale
             )
 
             tqdm.write(
