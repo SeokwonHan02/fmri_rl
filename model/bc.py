@@ -47,7 +47,7 @@ class BehaviorCloning(nn.Module):
         return action.item() if action.numel() == 1 else action
 
 
-def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothing=0.0, class_weights=None):
+def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, class_weights=None):
     model.train()
     total_loss = 0
     total_correct = 0
@@ -73,10 +73,6 @@ def train_bc(model, dataloader, optimizer, device, scheduler=None, label_smoothi
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-
-        # Update learning rate
-        if scheduler is not None:
-            scheduler.step()
 
         # Statistics
         total_loss += loss.item() * state.size(0)

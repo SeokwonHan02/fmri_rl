@@ -101,7 +101,7 @@ def main():
     print(f"Val batches: {len(val_loader)}")
 
     print("\nLoading pretrained DQN CNN...")
-    cnn = load_pretrained_cnn(args.dqn_path)
+    cnn = load_pretrained_cnn(args.dqn_path, freeze=args.freeze_encoder)
     cnn = cnn.to(device)
 
     # Create model based on algorithm
@@ -130,19 +130,25 @@ def main():
 
     model = model.to(device)
 
-    # Optimizer
-    optimizer = optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr
-    )
+    # Optimizer with separate learning rates for encoder and other parameters
+    if args.freeze_encoder:
+        # If encoder is frozen, only optimize non-encoder parameters
+        optimizer = optim.Adam(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.lr
+        )
+        print(f"Optimizer: Single LR={args.lr:.2e} (encoder frozen)")
+    else:
+        # If encoder is not frozen, use different learning rates
+        encoder_params = list(model.cnn.parameters())
+        encoder_param_ids = [id(p) for p in encoder_params]
+        other_params = [p for p in model.parameters() if id(p) not in encoder_param_ids and p.requires_grad]
 
-    # Learning rate scheduler (Cosine Annealing)
-    total_steps = args.epochs * len(train_loader)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=total_steps,
-        eta_min=args.lr * args.lr_decay_factor
-    )
+        optimizer = optim.Adam([
+            {'params': encoder_params, 'lr': args.encoder_lr},
+            {'params': other_params, 'lr': args.lr}
+        ])
+        print(f"Optimizer: Encoder LR={args.encoder_lr:.2e}, Other LR={args.lr:.2e}")
 
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -151,15 +157,13 @@ def main():
     step = 0
 
     for epoch in tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch"):
-        current_lr = optimizer.param_groups[0]['lr']
-
         # ===== TRAINING =====
         if args.algo == 'bc':
-            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, scheduler, args.label_smoothing, class_weights)
+            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, args.label_smoothing, class_weights)
             val_loss, val_accuracy = val_fn(model, val_loader, device, args.label_smoothing, class_weights)
 
             tqdm.write(
-                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - Loss: {train_loss:.4f}, Acc: {train_accuracy:.4f}\n"
                 f"  Val   - Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}"
             )
@@ -171,7 +175,7 @@ def main():
 
         elif args.algo == 'bcq':
             train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q, step = train_fn(
-                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq, args.label_smoothing
+                model, train_loader, optimizer, device, args.gamma, step, args.target_update_freq, args.label_smoothing
             )
 
             val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
@@ -179,7 +183,7 @@ def main():
             )
 
             tqdm.write(
-                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - Q Loss: {train_q_loss:.4f}, BC Loss: {train_bc_loss:.4f}, BC Acc: {train_bc_accuracy:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - Q Loss: {val_q_loss:.4f}, BC Loss: {val_bc_loss:.4f}, BC Acc: {val_bc_accuracy:.4f}, Avg Q: {val_avg_q:.2f}"
             )
@@ -191,7 +195,7 @@ def main():
 
         elif args.algo == 'cql':
             train_td_loss, train_cql_loss, train_total_loss, train_avg_q, step = train_fn(
-                model, train_loader, optimizer, device, args.gamma, scheduler, step, args.target_update_freq
+                model, train_loader, optimizer, device, args.gamma, step, args.target_update_freq
             )
 
             val_td_loss, val_cql_loss, val_total_loss, val_avg_q = val_cql(
@@ -199,7 +203,7 @@ def main():
             )
 
             tqdm.write(
-                f"Epoch {epoch}/{args.epochs} | LR: {current_lr:.2e}\n"
+                f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}"
             )

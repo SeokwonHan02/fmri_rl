@@ -55,7 +55,7 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_update_freq=1000):
     model.train()
     total_td_loss = 0
     total_cql_loss = 0
@@ -105,10 +105,6 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-
-        # Update learning rate
-        if scheduler is not None:
-            scheduler.step()
 
         # Update target network
         if step % target_update_freq == 0:

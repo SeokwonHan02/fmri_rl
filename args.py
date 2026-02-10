@@ -23,14 +23,16 @@ def get_args():
     parser.add_argument('--dqn-path', type=str,
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
                         help='Path to pretrained DQN parameters')
+    parser.add_argument('--freeze-encoder', action='store_true',
+                        help='Freeze pretrained DQN encoder (if False, encoder will be trained with encoder-lr)')
+    parser.add_argument('--encoder-lr', type=float, default=1e-5,
+                        help='Learning rate for encoder when not frozen')
 
     # Training
     parser.add_argument('--epochs', type=int, default=10,
                         help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
-    parser.add_argument('--lr-decay-factor', type=float, default=0.1,
-                        help='Final learning rate factor (1.0 = no decay)')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount factor for RL')
 

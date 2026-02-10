@@ -105,7 +105,7 @@ class BCQ(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, step=0, target_update_freq=1000, label_smoothing=0.0):
+def train_bcq(model, dataloader, optimizer, device, gamma=0.99, step=0, target_update_freq=1000, label_smoothing=0.0):
     model.train()
     total_q_loss = 0
     total_bc_loss = 0
@@ -170,10 +170,6 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, scheduler=None, 
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-
-        # Update learning rate (once per batch)
-        if scheduler is not None:
-            scheduler.step()
 
         # Update target network
         if step % target_update_freq == 0:

@@ -75,7 +75,7 @@ class DQN(nn.Module):
         return action.item() if action.numel() == 1 else action
 
 
-def load_pretrained_cnn(pretrained_path):
+def load_pretrained_cnn(pretrained_path, freeze=True):
     cnn = DQN_CNN()
 
     try:
@@ -116,10 +116,12 @@ def load_pretrained_cnn(pretrained_path):
         print(f"✗ Error loading pretrained CNN: {e}")
         raise
 
-    # Freeze all CNN parameters (outputs 3136 features)
-    for param in cnn.parameters():
-        param.requires_grad = False
-
-    print(f"✓ CNN frozen (outputs 3136 features, requires_grad=False)")
+    # Freeze encoder if specified
+    if freeze:
+        for param in cnn.parameters():
+            param.requires_grad = False
+        print(f"✓ CNN frozen (outputs 3136 features, requires_grad=False)")
+    else:
+        print(f"✓ CNN unfrozen (outputs 3136 features, will be trained with encoder_lr)")
 
     return cnn
