@@ -12,7 +12,7 @@ class BehaviorCloning(nn.Module):
     Fire: Not Fire (NOOP, RIGHT, LEFT) vs Yes Fire (FIRE, RIGHT+FIRE, LEFT+FIRE)
     Move: Not Move (NOOP, FIRE) vs Right (RIGHT, RIGHT+FIRE) vs Left (LEFT, LEFT+FIRE)
     """
-    def __init__(self, cnn, action_dim=6, logit_div=1.0, dropout_rate=0.0):
+    def __init__(self, cnn, action_dim=6, logit_div=1.0):
         super(BehaviorCloning, self).__init__()
 
         self.cnn = cnn
@@ -25,12 +25,6 @@ class BehaviorCloning(nn.Module):
             nn.ReLU(),
         )
 
-        # Optional dropout
-        if dropout_rate > 0:
-            self.dropout = nn.Dropout(p=dropout_rate)
-        else:
-            self.dropout = None
-
         # Fire head: binary classification (not fire vs yes fire)
         self.fire_head = nn.Linear(512, 2)
 
@@ -40,9 +34,6 @@ class BehaviorCloning(nn.Module):
     def forward(self, state):
         features = self.cnn(state)  # (batch, 3136)
         shared = self.shared_fc(features)  # (batch, 512)
-
-        if self.dropout is not None:
-            shared = self.dropout(shared)
 
         fire_logits = self.fire_head(shared)  # (batch, 2)
         move_logits = self.move_head(shared)  # (batch, 3)
@@ -127,7 +118,7 @@ def action_to_fire_move(action):
     return fire_label, move_label
 
 
-def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, class_weights=None, aug_transform=None):
+def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0):
     model.train()
     total_fire_loss = 0
     total_move_loss = 0
@@ -139,11 +130,6 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, class_we
 
     for batch in dataloader:
         state = batch['state'].to(device).float() / 255.0  # Normalize to [0, 1]
-
-        # Apply augmentation if provided (only during training)
-        if aug_transform is not None and model.training:
-            state = aug_transform(state)
-
         action = batch['action'].to(device)
 
         # Convert one-hot action to class index
@@ -193,7 +179,7 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, class_we
     return avg_loss, action_accuracy, avg_fire_loss, avg_move_loss, fire_accuracy, move_accuracy
 
 
-def val_bc(model, dataloader, device, label_smoothing=0.0, class_weights=None):
+def val_bc(model, dataloader, device, label_smoothing=0.0):
     """Validation function for Behavior Cloning"""
     model.eval()
     total_fire_loss = 0

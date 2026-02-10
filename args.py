@@ -30,16 +30,6 @@ def get_args():
     parser.add_argument('--encoder-lr', type=float, default=1e-5,
                         help='Learning rate for encoder when not frozen')
 
-    # Data Augmentation
-    parser.add_argument('--use-augmentation', action='store_true',
-                        help='Use data augmentation (Pad + RandomCrop) during training')
-    parser.add_argument('--aug-pad', type=int, default=4,
-                        help='Padding size for data augmentation')
-
-    # Regularization
-    parser.add_argument('--dropout-rate', type=float, default=0.0,
-                        help='Dropout rate for BC model (0.0 = no dropout, 0.5 recommended)')
-
     # Training
     parser.add_argument('--epochs', type=int, default=10,
                         help='Number of training epochs')

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms as T
 import numpy as np
 import random
 from pathlib import Path
@@ -114,25 +113,14 @@ def main():
     )
     cnn = cnn.to(device)
 
-    # Create augmentation transform if needed (only for BC)
-    aug_transform = None
-    if args.use_augmentation and args.algo == 'bc':
-        aug_transform = nn.Sequential(
-            T.Pad(args.aug_pad, padding_mode='edge'),
-            T.RandomCrop(size=(84, 84))
-        ).to(device)
-        print(f"Data augmentation enabled: Pad({args.aug_pad}) + RandomCrop(84x84)")
-
     # Create model based on algorithm
     print(f"\nCreating {args.algo.upper()} model...")
 
     if args.algo == 'bc':
-        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div, dropout_rate=args.dropout_rate)
+        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
         train_fn = train_bc
         val_fn = val_bc
-        if args.dropout_rate > 0:
-            print(f"Dropout enabled: rate={args.dropout_rate}")
-        print("BC Loss: Fire Binary CE + Move 3-class CE (no class weights)")
+        print("BC Loss: Fire Binary CE + Move 3-class CE")
 
     elif args.algo == 'bcq':
         model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div, bc_path=args.bc_path)
@@ -190,10 +178,10 @@ def main():
         # ===== TRAINING =====
         if args.algo == 'bc':
             train_loss, train_acc, train_fire_loss, train_move_loss, train_fire_acc, train_move_acc = train_fn(
-                model, train_loader, optimizer, device, args.label_smoothing, None, aug_transform
+                model, train_loader, optimizer, device, args.label_smoothing
             )
             val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc = val_fn(
-                model, val_loader, device, args.label_smoothing, None
+                model, val_loader, device, args.label_smoothing
             )
 
             tqdm.write(
