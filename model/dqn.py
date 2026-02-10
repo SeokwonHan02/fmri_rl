@@ -127,8 +127,15 @@ def load_pretrained_cnn(pretrained_path, freeze=True, freeze_conv12_only=False):
             param.requires_grad = False
         for param in cnn.cnn[2].parameters():  # Conv2
             param.requires_grad = False
+        # Explicitly ensure Conv3 is trainable (in case checkpoint had it frozen)
+        for param in cnn.cnn[4].parameters():  # Conv3
+            param.requires_grad = True
         print(f"✓ Conv1 and Conv2 frozen, Conv3 trainable")
     else:
+        # FIX: Explicitly set requires_grad=True for all parameters
+        # Checkpoint may have been saved with requires_grad=False, so we need to override
+        for param in cnn.parameters():
+            param.requires_grad = True
         print(f"✓ CNN unfrozen (all conv layers trainable)")
 
     return cnn

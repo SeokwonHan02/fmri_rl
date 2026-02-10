@@ -1,11 +1,13 @@
-process_game2_data_fixed.py
 checkpoints/
 *.pyc
 __pycache__/
-processed_data_frameskip_4/
 pretrained/
+processed_data_frameskip_4/
+
+process_game2_data_fixed.py
+render_episodes/
+
 *.err
 *.out
 *.slurm
-
 experiments/

@@ -59,11 +59,15 @@ def compute_fire_move_weights(dataloader, device='cpu', exponent=0.5):
         fire_weights = torch.ones(2)
         move_weights = torch.ones(3)
     else:
+        # Prevent division by zero with clamp_min
+        fire_counts_safe = fire_counts.float().clamp_min(1.0)
+        move_counts_safe = move_counts.float().clamp_min(1.0)
+
         # Apply exponent to inverse frequency weights
-        fire_raw_weights = total_samples / (2 * fire_counts.float())
+        fire_raw_weights = total_samples / (2 * fire_counts_safe)
         fire_weights = fire_raw_weights ** exponent
 
-        move_raw_weights = total_samples / (3 * move_counts.float())
+        move_raw_weights = total_samples / (3 * move_counts_safe)
         move_weights = move_raw_weights ** exponent
 
     # Print distribution

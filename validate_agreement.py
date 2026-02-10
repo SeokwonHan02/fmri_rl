@@ -148,6 +148,7 @@ def validate_agreement(args):
 
     # Initialize counters
     correct_counts = {name: 0 for name in models.keys()}
+    per_action_correct = {name: np.zeros(args.action_dim, dtype=np.int64) for name in models.keys()}
     total_samples = 0
 
     # Collect human actions for histogram
@@ -182,8 +183,14 @@ def validate_agreement(args):
                     if pred.dim() == 0:
                         pred = pred.unsqueeze(0)
 
-                    # Count matches
-                    correct_counts[name] += (pred == human_action).sum().item()
+                    # Count total matches
+                    matches = (pred == human_action)
+                    correct_counts[name] += matches.sum().item()
+
+                    # Count per-action matches
+                    for action_idx in range(args.action_dim):
+                        action_mask = (human_action == action_idx)
+                        per_action_correct[name][action_idx] += (matches & action_mask).sum().item()
 
                 except Exception as e:
                     print(f"\n  ⚠️  Error with {name.upper()}: {e}")
@@ -212,12 +219,16 @@ def validate_agreement(args):
     print(f"Most Frequent Baseline: {most_frequent_baseline:.2f}% (always predict most frequent)")
     print("="*80)
 
-    # 7. Print results
+    # 7. Print overall results
     print("\n" + "="*80)
-    print(f"VALIDATION RESULTS (Total samples: {total_samples:,})")
+    print(f"OVERALL VALIDATION RESULTS (Total samples: {total_samples:,})")
     print("="*80)
-    print(f"\nRandom Chance:           {1/args.action_dim*100:.2f}%")
-    print(f"Most Frequent Baseline:  {most_frequent_baseline:.2f}%")
+
+    # Baselines
+    random_baseline = 1/args.action_dim*100
+    print(f"\n📊 BASELINES:")
+    print(f"  Random Chance:           {random_baseline:.2f}% (uniform random selection)")
+    print(f"  Most Frequent Baseline:  {most_frequent_baseline:.2f}% (always predict {action_names[most_frequent_action]})")
     print("-"*80)
 
     # Sort results by accuracy
@@ -228,32 +239,52 @@ def validate_agreement(args):
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    # Display results
+    # Display overall results
     model_names = {
         'bc': 'BC  (Habit)',
         'cql': 'CQL (Value)',
         'bcq': 'BCQ (Hybrid)'
     }
 
+    print(f"\n📈 MODEL PERFORMANCE:")
     for name, accuracy, correct in results:
         display_name = model_names.get(name, name.upper())
         beats_baseline = "✓" if accuracy > most_frequent_baseline else "✗"
+        vs_random = accuracy - random_baseline
+        vs_freq = accuracy - most_frequent_baseline
         print(f"{display_name:15s}: {accuracy:6.2f}%  ({correct:,}/{total_samples:,} correct) [{beats_baseline}]")
+        print(f"                    vs Random: {vs_random:+6.2f}%  |  vs Most Freq: {vs_freq:+6.2f}%")
 
     print("="*80)
 
-    # 8. Additional analysis
-    print("\nPerformance vs. Most Frequent Baseline ({:.2f}%):".format(most_frequent_baseline))
-    print("-"*80)
+    # 8. Per-action accuracy breakdown
+    print("\n" + "="*80)
+    print("PER-ACTION ACCURACY BREAKDOWN")
+    print("="*80)
+
     for name, accuracy, _ in results:
         display_name = model_names.get(name, name.upper())
-        diff = accuracy - most_frequent_baseline
-        if diff > 0:
-            print(f"{display_name:15s}: +{diff:.2f}% (BEATS baseline)")
-        elif diff < 0:
-            print(f"{display_name:15s}: {diff:.2f}% (below baseline)")
-        else:
-            print(f"{display_name:15s}: Same as baseline")
+        print(f"\n{display_name}:")
+        print("-"*80)
+        print(f"{'Action':<15s} {'Count':>8s} {'Correct':>8s} {'Accuracy':>10s} {'Bar':>20s}")
+        print("-"*80)
+
+        for action_idx in range(args.action_dim):
+            action_name = action_names[action_idx] if action_idx < len(action_names) else f'Action {action_idx}'
+            count = human_action_counts[action_idx]
+            correct = per_action_correct[name][action_idx]
+
+            if count > 0:
+                action_acc = correct / count * 100
+                bar_length = int(action_acc / 5)  # Scale to 20 chars max
+                bar = '█' * bar_length
+                print(f"{action_name:<15s} {count:>8,} {correct:>8,} {action_acc:>9.2f}% {bar:>20s}")
+            else:
+                print(f"{action_name:<15s} {count:>8,} {correct:>8,} {'N/A':>10s}")
+
+        print("-"*80)
+        print(f"{'OVERALL':<15s} {total_samples:>8,} {correct_counts[name]:>8,} {accuracy:>9.2f}%")
+
     print("="*80)
 
 

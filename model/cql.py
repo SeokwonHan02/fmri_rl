@@ -85,13 +85,11 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         model.training_step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
-        # FIX BUG #7: Parameterized reward scaling (same as BCQ)
         reward = batch['reward'].to(device).float() * reward_scale
         next_state = batch['next_state'].to(device).float() / 255.0
         done = batch['done'].to(device).float()
 
-        # Fix dimensions: ensure all tensors are 1D to prevent broadcasting bugs
-        # reward, done are usually (Batch, 1) from dataloader -> squeeze to (Batch,)
+        # Ensure all tensors are 1D to prevent broadcasting bugs
         if reward.dim() == 2:
             reward = reward.squeeze(1)
         if done.dim() == 2:
@@ -109,7 +107,6 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
 
         # Compute target Q-value
         with torch.no_grad():
-            # NOTE: Using online CNN here. Safe because CNN is frozen in __init__
             next_features = model.cnn(next_state)
             next_q_values = model.q_network_target(next_features)
             next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
@@ -120,15 +117,10 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         td_loss = F.smooth_l1_loss(q_value, target_q)
 
         # CQL loss: penalize Q-values of all actions, boost Q-value of taken action
-        # CQL term: log(sum(exp(Q(s, a)))) - Q(s, a_taken)
         logsumexp_q = torch.logsumexp(q_values, dim=1)
         cql_loss = (logsumexp_q - q_value).mean()
 
         # Total loss: TD loss + CQL regularization
-        # FIX BUG #3: Alpha should be 0.1-0.5 for discrete actions (was 1.0, too high)
-        # CQL term penalizes unseen actions to prevent overestimation
-        # If alpha too high, Q-values collapse to zero (over-conservative)
-        # If alpha too low, overfitting to in-distribution actions
         total_loss = td_loss + model.alpha * cql_loss
 
         # Backward pass
@@ -139,10 +131,6 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         optimizer.step()
 
         # Update target network periodically for stable Q-learning
-        # FIX BUG #2: Reduced default from 1000 to 100 for offline RL stability
-        # Too high = stale targets, training instability
-        # Too low = moving target, slow convergence
-        # Typical range: 100-250 for offline settings
         if model.training_step % target_update_freq == 0:
             model.update_target()
 
@@ -178,7 +166,7 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1):
             next_state = batch['next_state'].to(device).float() / 255.0
             done = batch['done'].to(device).float()
 
-            # Fix dimensions: ensure all tensors are 1D to prevent broadcasting bugs
+            # Ensure all tensors are 1D to prevent broadcasting bugs
             if reward.dim() == 2:
                 reward = reward.squeeze(1)
             if done.dim() == 2:
