@@ -6,9 +6,10 @@ from .dqn import DQN_CNN
 
 class BehaviorCloning(nn.Module):
     """
-    Behavior Cloning model with factorized action space
-    Architecture: DQN_CNN -> Shared FC -> Fire Head (2-class) + Move Head (3-class)
+    Behavior Cloning model
+    Architecture: DQN_CNN (frozen, outputs 3136) -> Linear(3136 -> 512) -> Linear(512 -> 6)
 
+    Loss is computed by marginalizing action probabilities into fire and move:
     Fire: Not Fire (NOOP, RIGHT, LEFT) vs Yes Fire (FIRE, RIGHT+FIRE, LEFT+FIRE)
     Move: Not Move (NOOP, FIRE) vs Right (RIGHT, RIGHT+FIRE) vs Left (LEFT, LEFT+FIRE)
     """
@@ -19,73 +20,35 @@ class BehaviorCloning(nn.Module):
         self.action_dim = action_dim
         self.logit_div = logit_div
 
-        # Shared feature layer: 3136 -> 512
-        self.shared_fc = nn.Sequential(
+        # Action head: 3136 -> 512 -> 6
+        self.action_head = nn.Sequential(
             nn.Linear(3136, 512),
             nn.ReLU(),
+            nn.Linear(512, action_dim)
         )
-
-        # Fire head: binary classification (not fire vs yes fire)
-        self.fire_head = nn.Linear(512, 2)
-
-        # Move head: 3-class classification (not move, right, left)
-        self.move_head = nn.Linear(512, 3)
 
     def forward(self, state):
         features = self.cnn(state)  # (batch, 3136)
-        shared = self.shared_fc(features)  # (batch, 512)
-
-        fire_logits = self.fire_head(shared)  # (batch, 2)
-        move_logits = self.move_head(shared)  # (batch, 3)
-
-        return fire_logits, move_logits
+        action_logits = self.action_head(features)  # (batch, 6)
+        return action_logits
 
     def get_action(self, state, deterministic=True):
         if state.dim() == 3:
             state = state.unsqueeze(0)
 
         with torch.no_grad():
-            fire_logits, move_logits = self.forward(state)
+            action_logits = self.forward(state)
 
             # Apply temperature scaling
-            fire_logits = fire_logits / self.logit_div
-            move_logits = move_logits / self.logit_div
+            action_logits = action_logits / self.logit_div
 
             if deterministic:
-                fire_pred = fire_logits.argmax(dim=-1)  # 0 or 1
-                move_pred = move_logits.argmax(dim=-1)  # 0, 1, or 2
+                action = action_logits.argmax(dim=-1)
             else:
-                fire_probs = F.softmax(fire_logits, dim=-1)
-                move_probs = F.softmax(move_logits, dim=-1)
-                fire_pred = torch.multinomial(fire_probs, 1).squeeze(-1)
-                move_pred = torch.multinomial(move_probs, 1).squeeze(-1)
-
-            # Reconstruct action from fire and move predictions
-            action = self._reconstruct_action(fire_pred, move_pred)
+                action_probs = F.softmax(action_logits, dim=-1)
+                action = torch.multinomial(action_probs, 1).squeeze(-1)
 
         return action.item() if action.numel() == 1 else action
-
-    def _reconstruct_action(self, fire_pred, move_pred):
-        """
-        Reconstruct original action from fire and move predictions
-
-        Mapping:
-        - (fire=0, move=0) -> NOOP (0)
-        - (fire=1, move=0) -> FIRE (1)
-        - (fire=0, move=1) -> RIGHT (2)
-        - (fire=0, move=2) -> LEFT (3)
-        - (fire=1, move=1) -> RIGHT+FIRE (4)
-        - (fire=1, move=2) -> LEFT+FIRE (5)
-        """
-        # Create mapping tensor: [fire][move] -> action
-        action_map = torch.tensor([
-            [0, 2, 3],  # fire=0: NOOP, RIGHT, LEFT
-            [1, 4, 5],  # fire=1: FIRE, RIGHT+FIRE, LEFT+FIRE
-        ], device=fire_pred.device)
-
-        # Index into the mapping
-        action = action_map[fire_pred, move_pred]
-        return action
 
 
 def action_to_fire_move(action):
@@ -118,7 +81,7 @@ def action_to_fire_move(action):
     return fire_label, move_label
 
 
-def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0):
+def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, fire_weights=None, move_weights=None):
     model.train()
     total_fire_loss = 0
     total_move_loss = 0
@@ -141,12 +104,26 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0):
         fire_label = fire_label.to(device)
         move_label = move_label.to(device)
 
-        # Forward pass
-        fire_logits, move_logits = model(state)
+        # Forward pass: (batch, 6)
+        action_logits = model(state)
+
+        # Marginalize action logits into fire and move logits
+        # Fire: fire=0 (NOOP, RIGHT, LEFT) vs fire=1 (FIRE, RIGHT+FIRE, LEFT+FIRE)
+        fire_logits = torch.stack([
+            torch.logsumexp(action_logits[:, [0, 2, 3]], dim=1),  # fire=0
+            torch.logsumexp(action_logits[:, [1, 4, 5]], dim=1),  # fire=1
+        ], dim=1)
+
+        # Move: move=0 (NOOP, FIRE) vs move=1 (RIGHT, RIGHT+FIRE) vs move=2 (LEFT, LEFT+FIRE)
+        move_logits = torch.stack([
+            torch.logsumexp(action_logits[:, [0, 1]], dim=1),  # move=0
+            torch.logsumexp(action_logits[:, [2, 4]], dim=1),  # move=1
+            torch.logsumexp(action_logits[:, [3, 5]], dim=1),  # move=2
+        ], dim=1)
 
         # Compute losses (fire binary CE + move multi-class CE)
-        fire_loss = F.cross_entropy(fire_logits, fire_label, label_smoothing=label_smoothing)
-        move_loss = F.cross_entropy(move_logits, move_label, label_smoothing=label_smoothing)
+        fire_loss = F.cross_entropy(fire_logits, fire_label, weight=fire_weights, label_smoothing=label_smoothing)
+        move_loss = F.cross_entropy(move_logits, move_label, weight=move_weights, label_smoothing=label_smoothing)
         loss = fire_loss + move_loss
 
         # Backward pass
@@ -157,9 +134,9 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0):
         optimizer.step()
 
         # Statistics
+        action_pred = action_logits.argmax(dim=-1)
         fire_pred = fire_logits.argmax(dim=-1)
         move_pred = move_logits.argmax(dim=-1)
-        action_pred = model._reconstruct_action(fire_pred, move_pred)
 
         total_fire_loss += fire_loss.item() * state.size(0)
         total_move_loss += move_loss.item() * state.size(0)
@@ -179,7 +156,7 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0):
     return avg_loss, action_accuracy, avg_fire_loss, avg_move_loss, fire_accuracy, move_accuracy
 
 
-def val_bc(model, dataloader, device, label_smoothing=0.0):
+def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, move_weights=None):
     """Validation function for Behavior Cloning"""
     model.eval()
     total_fire_loss = 0
@@ -204,18 +181,32 @@ def val_bc(model, dataloader, device, label_smoothing=0.0):
             fire_label = fire_label.to(device)
             move_label = move_label.to(device)
 
-            # Forward pass
-            fire_logits, move_logits = model(state)
+            # Forward pass: (batch, 6)
+            action_logits = model(state)
+
+            # Marginalize action logits into fire and move logits
+            # Fire: fire=0 (NOOP, RIGHT, LEFT) vs fire=1 (FIRE, RIGHT+FIRE, LEFT+FIRE)
+            fire_logits = torch.stack([
+                torch.logsumexp(action_logits[:, [0, 2, 3]], dim=1),  # fire=0
+                torch.logsumexp(action_logits[:, [1, 4, 5]], dim=1),  # fire=1
+            ], dim=1)
+
+            # Move: move=0 (NOOP, FIRE) vs move=1 (RIGHT, RIGHT+FIRE) vs move=2 (LEFT, LEFT+FIRE)
+            move_logits = torch.stack([
+                torch.logsumexp(action_logits[:, [0, 1]], dim=1),  # move=0
+                torch.logsumexp(action_logits[:, [2, 4]], dim=1),  # move=1
+                torch.logsumexp(action_logits[:, [3, 5]], dim=1),  # move=2
+            ], dim=1)
 
             # Compute losses
-            fire_loss = F.cross_entropy(fire_logits, fire_label, label_smoothing=label_smoothing)
-            move_loss = F.cross_entropy(move_logits, move_label, label_smoothing=label_smoothing)
+            fire_loss = F.cross_entropy(fire_logits, fire_label, weight=fire_weights, label_smoothing=label_smoothing)
+            move_loss = F.cross_entropy(move_logits, move_label, weight=move_weights, label_smoothing=label_smoothing)
             loss = fire_loss + move_loss
 
             # Statistics
+            action_pred = action_logits.argmax(dim=-1)
             fire_pred = fire_logits.argmax(dim=-1)
             move_pred = move_logits.argmax(dim=-1)
-            action_pred = model._reconstruct_action(fire_pred, move_pred)
 
             total_fire_loss += fire_loss.item() * state.size(0)
             total_move_loss += move_loss.item() * state.size(0)

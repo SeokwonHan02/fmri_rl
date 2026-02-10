@@ -78,6 +78,74 @@ def compute_class_weights(dataloader, action_dim=6, device='cpu', exponent=1.0):
     return class_weights.to(device)
 
 
+def compute_fire_move_weights(dataloader, device='cpu', exponent=1.0):
+    """
+    Compute class weights for fire and move based on inverse frequency
+
+    Args:
+        dataloader: DataLoader to compute action distribution from
+        device: Device to put weights on
+        exponent: Exponent to apply to weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)
+
+    Returns:
+        fire_weights: Tensor of shape (2,) for fire classes
+        move_weights: Tensor of shape (3,) for move classes
+    """
+    from model.bc import action_to_fire_move
+
+    print(f"\nComputing fire/move class weights from action distribution (exponent={exponent})...")
+    fire_counts = torch.zeros(2, dtype=torch.long)  # fire=0, fire=1
+    move_counts = torch.zeros(3, dtype=torch.long)  # move=0, move=1, move=2
+
+    for batch in dataloader:
+        action = batch['action']
+
+        # Convert one-hot to index if needed
+        if action.dim() == 2:
+            action_idx = action.argmax(dim=-1)
+        else:
+            action_idx = action
+
+        # Convert to fire and move labels
+        fire_label, move_label = action_to_fire_move(action_idx)
+
+        # Count each fire and move
+        for f in fire_label:
+            fire_counts[f] += 1
+        for m in move_label:
+            move_counts[m] += 1
+
+    total_samples = fire_counts.sum().float()
+
+    # Compute weights
+    if exponent == 0.0:
+        # No weighting - all weights are 1
+        fire_weights = torch.ones(2)
+        move_weights = torch.ones(3)
+    else:
+        # Apply exponent to inverse frequency weights
+        fire_raw_weights = total_samples / (2 * fire_counts.float())
+        fire_weights = fire_raw_weights ** exponent
+
+        move_raw_weights = total_samples / (3 * move_counts.float())
+        move_weights = move_raw_weights ** exponent
+
+    # Print distribution
+    print("\nFire Distribution:")
+    fire_names = ['No Fire (NOOP, RIGHT, LEFT)', 'Fire (FIRE, RIGHT+FIRE, LEFT+FIRE)']
+    for i in range(2):
+        percentage = (fire_counts[i].float() / total_samples * 100).item()
+        print(f"  {fire_names[i]:40s}: {fire_counts[i]:6,} ({percentage:5.2f}%) - Weight: {fire_weights[i]:.4f}")
+
+    print("\nMove Distribution:")
+    move_names = ['No Move (NOOP, FIRE)', 'Right (RIGHT, RIGHT+FIRE)', 'Left (LEFT, LEFT+FIRE)']
+    for i in range(3):
+        percentage = (move_counts[i].float() / total_samples * 100).item()
+        print(f"  {move_names[i]:40s}: {move_counts[i]:6,} ({percentage:5.2f}%) - Weight: {move_weights[i]:.4f}")
+
+    return fire_weights.to(device), move_weights.to(device)
+
+
 def main():
     args = get_args()
     set_seed(args.seed)
@@ -121,6 +189,15 @@ def main():
         train_fn = train_bc
         val_fn = val_bc
         print("BC Loss: Fire Binary CE + Move 3-class CE")
+
+        # Compute fire/move class weights if weight exponent > 0
+        if args.class_weight_exponent > 0:
+            fire_weights, move_weights = compute_fire_move_weights(
+                train_loader, device, args.class_weight_exponent
+            )
+        else:
+            fire_weights, move_weights = None, None
+            print("\nNo class weighting (exponent=0.0)")
 
     elif args.algo == 'bcq':
         model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div, bc_path=args.bc_path)
@@ -178,10 +255,10 @@ def main():
         # ===== TRAINING =====
         if args.algo == 'bc':
             train_loss, train_acc, train_fire_loss, train_move_loss, train_fire_acc, train_move_acc = train_fn(
-                model, train_loader, optimizer, device, args.label_smoothing
+                model, train_loader, optimizer, device, args.label_smoothing, fire_weights, move_weights
             )
             val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc = val_fn(
-                model, val_loader, device, args.label_smoothing
+                model, val_loader, device, args.label_smoothing, fire_weights, move_weights
             )
 
             tqdm.write(
@@ -245,7 +322,7 @@ def main():
             tqdm.write(f"EVALUATION at Epoch {epoch}")
             tqdm.write(f"{'='*80}")
 
-            eval_stats = evaluate_agent(model, args.env_name, device, args.eval_episodes, args.seed + epoch)
+            eval_stats = evaluate_agent(model, args.env_name, device, args.eval_episodes, args.seed + epoch, args.deterministic)
             tqdm.write(
                 f"  Eval - Mean Reward: {eval_stats['mean_reward']:.2f} ± {eval_stats['std_reward']:.2f}\n"
                 f"         Min: {eval_stats['min_reward']:.1f}, Max: {eval_stats['max_reward']:.1f}\n"

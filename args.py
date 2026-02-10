@@ -51,12 +51,16 @@ def get_args():
                         help='Path to pretrained BC model (if provided, BC network will be frozen)')
 
     # BC and BCQ behavior cloning
-    parser.add_argument('--label-smoothing', type=float, default=0.1,
+    parser.add_argument('--label-smoothing', type=float, default=0.0,
                         help='Label smoothing for BC loss (0.0 = no smoothing)')
     parser.add_argument('--logit-div', type=float, default=2.0,
                         help='Logit division for temperature scaling')
     parser.add_argument('--class-weight-exponent', type=float, default=0.5,
                         help='Exponent for class weights (0.0 = no weight, 0.5 = sqrt, 1.0 = inverse frequency)')
+    parser.add_argument('--deterministic', action='store_true', default=True,
+                        help='Use deterministic action selection during evaluation (default: True)')
+    parser.add_argument('--stochastic', dest='deterministic', action='store_false',
+                        help='Use stochastic action selection during evaluation')
 
     # Logging and saving
     parser.add_argument('--save-dir', type=str, default='/Users/seokwon/research/fMRI_RL/checkpoints',

@@ -38,7 +38,7 @@ def make_atari_env(env_name='SpaceInvadersNoFrameskip-v4', seed=0):
     return env
 
 
-def evaluate_agent(model, env_name, device, num_episodes=10, seed=0):
+def evaluate_agent(model, env_name, device, num_episodes=10, seed=0, deterministic=True):
     """
     Evaluate an agent in the real environment
 
@@ -48,6 +48,7 @@ def evaluate_agent(model, env_name, device, num_episodes=10, seed=0):
         device: Device to run evaluation on
         num_episodes: Number of episodes to run
         seed: Random seed for environment
+        deterministic: Whether to use deterministic action selection
 
     Returns:
         Dictionary with mean, std, min, max rewards
@@ -71,9 +72,9 @@ def evaluate_agent(model, env_name, device, num_episodes=10, seed=0):
             # State from env is (4, 84, 84) uint8
             state_tensor = torch.from_numpy(state).unsqueeze(0).to(device).float() / 255.0
 
-            # Get action from model (deterministic)
+            # Get action from model
             with torch.no_grad():
-                action = model.get_action(state_tensor.squeeze(0), deterministic=True)
+                action = model.get_action(state_tensor.squeeze(0), deterministic=deterministic)
 
             # Step environment
             state, reward, terminated, truncated, info = env.step(action)
