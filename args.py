@@ -24,9 +24,21 @@ def get_args():
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
                         help='Path to pretrained DQN parameters')
     parser.add_argument('--freeze-encoder', action='store_true',
-                        help='Freeze pretrained DQN encoder (if False, encoder will be trained with encoder-lr)')
+                        help='Freeze entire DQN encoder (all conv layers)')
+    parser.add_argument('--freeze-conv12-only', action='store_true',
+                        help='Freeze only Conv1 and Conv2, unfreeze Conv3 (recommended for BC)')
     parser.add_argument('--encoder-lr', type=float, default=1e-5,
                         help='Learning rate for encoder when not frozen')
+
+    # Data Augmentation
+    parser.add_argument('--use-augmentation', action='store_true',
+                        help='Use data augmentation (Pad + RandomCrop) during training')
+    parser.add_argument('--aug-pad', type=int, default=4,
+                        help='Padding size for data augmentation')
+
+    # Regularization
+    parser.add_argument('--dropout-rate', type=float, default=0.0,
+                        help='Dropout rate for BC model (0.0 = no dropout, 0.5 recommended)')
 
     # Training
     parser.add_argument('--epochs', type=int, default=10,

@@ -1,5 +1,7 @@
 import torch
+import torch.nn as nn
 import torch.optim as optim
+import torchvision.transforms as T
 import numpy as np
 import random
 from pathlib import Path
@@ -81,6 +83,10 @@ def main():
     args = get_args()
     set_seed(args.seed)
 
+    # Validate freeze options
+    if args.freeze_encoder and args.freeze_conv12_only:
+        raise ValueError("Cannot use both --freeze-encoder and --freeze-conv12-only. Choose one.")
+
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -101,19 +107,32 @@ def main():
     print(f"Val batches: {len(val_loader)}")
 
     print("\nLoading pretrained DQN CNN...")
-    cnn = load_pretrained_cnn(args.dqn_path, freeze=args.freeze_encoder)
+    cnn = load_pretrained_cnn(
+        args.dqn_path,
+        freeze=args.freeze_encoder,
+        freeze_conv12_only=args.freeze_conv12_only
+    )
     cnn = cnn.to(device)
+
+    # Create augmentation transform if needed (only for BC)
+    aug_transform = None
+    if args.use_augmentation and args.algo == 'bc':
+        aug_transform = nn.Sequential(
+            T.Pad(args.aug_pad, padding_mode='edge'),
+            T.RandomCrop(size=(84, 84))
+        ).to(device)
+        print(f"Data augmentation enabled: Pad({args.aug_pad}) + RandomCrop(84x84)")
 
     # Create model based on algorithm
     print(f"\nCreating {args.algo.upper()} model...")
 
-    # Compute class weights for BC (to handle class imbalance)
-    class_weights = None
     if args.algo == 'bc':
-        class_weights = compute_class_weights(train_loader, action_dim=6, device=device, exponent=args.class_weight_exponent)
-        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div)
+        model = BehaviorCloning(cnn, action_dim=6, logit_div=args.logit_div, dropout_rate=args.dropout_rate)
         train_fn = train_bc
         val_fn = val_bc
+        if args.dropout_rate > 0:
+            print(f"Dropout enabled: rate={args.dropout_rate}")
+        print("BC Loss: Fire Binary CE + Move 3-class CE (no class weights)")
 
     elif args.algo == 'bcq':
         model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, logit_div=args.logit_div, bc_path=args.bc_path)
@@ -132,14 +151,25 @@ def main():
 
     # Optimizer with separate learning rates for encoder and other parameters
     if args.freeze_encoder:
-        # If encoder is frozen, only optimize non-encoder parameters
+        # All encoder frozen, only optimize non-encoder parameters
         optimizer = optim.Adam(
             filter(lambda p: p.requires_grad, model.parameters()),
             lr=args.lr
         )
-        print(f"Optimizer: Single LR={args.lr:.2e} (encoder frozen)")
+        print(f"Optimizer: Single LR={args.lr:.2e} (entire encoder frozen)")
+    elif args.freeze_conv12_only:
+        # Conv1, Conv2 frozen, Conv3 trainable with encoder_lr
+        conv3_params = list(model.cnn.cnn[4].parameters())  # Conv3
+        conv3_param_ids = [id(p) for p in conv3_params]
+        other_params = [p for p in model.parameters() if id(p) not in conv3_param_ids and p.requires_grad]
+
+        optimizer = optim.Adam([
+            {'params': conv3_params, 'lr': args.encoder_lr},
+            {'params': other_params, 'lr': args.lr}
+        ])
+        print(f"Optimizer: Conv3 LR={args.encoder_lr:.2e}, Other LR={args.lr:.2e} (Conv1/Conv2 frozen)")
     else:
-        # If encoder is not frozen, use different learning rates
+        # All encoder trainable with encoder_lr
         encoder_params = list(model.cnn.parameters())
         encoder_param_ids = [id(p) for p in encoder_params]
         other_params = [p for p in model.parameters() if id(p) not in encoder_param_ids and p.requires_grad]
@@ -159,13 +189,21 @@ def main():
     for epoch in tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch"):
         # ===== TRAINING =====
         if args.algo == 'bc':
-            train_loss, train_accuracy = train_fn(model, train_loader, optimizer, device, args.label_smoothing, class_weights)
-            val_loss, val_accuracy = val_fn(model, val_loader, device, args.label_smoothing, class_weights)
+            train_loss, train_acc, train_fire_loss, train_move_loss, train_fire_acc, train_move_acc = train_fn(
+                model, train_loader, optimizer, device, args.label_smoothing, None, aug_transform
+            )
+            val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc = val_fn(
+                model, val_loader, device, args.label_smoothing, None
+            )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
-                f"  Train - Loss: {train_loss:.4f}, Acc: {train_accuracy:.4f}\n"
-                f"  Val   - Loss: {val_loss:.4f}, Acc: {val_accuracy:.4f}"
+                f"  Train - Loss: {train_loss:.4f}, Action Acc: {train_acc:.4f}\n"
+                f"          Fire Loss: {train_fire_loss:.4f}, Fire Acc: {train_fire_acc:.4f}\n"
+                f"          Move Loss: {train_move_loss:.4f}, Move Acc: {train_move_acc:.4f}\n"
+                f"  Val   - Loss: {val_loss:.4f}, Action Acc: {val_acc:.4f}\n"
+                f"          Fire Loss: {val_fire_loss:.4f}, Fire Acc: {val_fire_acc:.4f}\n"
+                f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}"
             )
 
             # Save model every save_interval epochs

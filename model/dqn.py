@@ -75,7 +75,7 @@ class DQN(nn.Module):
         return action.item() if action.numel() == 1 else action
 
 
-def load_pretrained_cnn(pretrained_path, freeze=True):
+def load_pretrained_cnn(pretrained_path, freeze=True, freeze_conv12_only=False):
     cnn = DQN_CNN()
 
     try:
@@ -116,12 +116,19 @@ def load_pretrained_cnn(pretrained_path, freeze=True):
         print(f"✗ Error loading pretrained CNN: {e}")
         raise
 
-    # Freeze encoder if specified
+    # Freeze encoder layers as specified
     if freeze:
         for param in cnn.parameters():
             param.requires_grad = False
-        print(f"✓ CNN frozen (outputs 3136 features, requires_grad=False)")
+        print(f"✓ CNN frozen (all conv layers frozen)")
+    elif freeze_conv12_only:
+        # Freeze Conv1 (cnn.0) and Conv2 (cnn.2), keep Conv3 (cnn.4) trainable
+        for param in cnn.cnn[0].parameters():  # Conv1
+            param.requires_grad = False
+        for param in cnn.cnn[2].parameters():  # Conv2
+            param.requires_grad = False
+        print(f"✓ Conv1 and Conv2 frozen, Conv3 trainable (recommended for BC)")
     else:
-        print(f"✓ CNN unfrozen (outputs 3136 features, will be trained with encoder_lr)")
+        print(f"✓ CNN unfrozen (all conv layers trainable)")
 
     return cnn
