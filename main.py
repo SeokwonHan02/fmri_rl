@@ -249,8 +249,6 @@ def main():
     print(f"\nStarting training for {args.epochs} epochs...")
     print("="*80)
 
-    step = 0
-
     for epoch in tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch"):
         # ===== TRAINING =====
         if args.algo == 'bc':
@@ -277,8 +275,8 @@ def main():
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'bcq':
-            train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q, step = train_fn(
-                model, train_loader, optimizer, device, args.gamma, step, args.target_update_freq, args.label_smoothing
+            train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q = train_fn(
+                model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.label_smoothing
             )
 
             val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
@@ -297,8 +295,8 @@ def main():
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'cql':
-            train_td_loss, train_cql_loss, train_total_loss, train_avg_q, step = train_fn(
-                model, train_loader, optimizer, device, args.gamma, step, args.target_update_freq
+            train_td_loss, train_cql_loss, train_total_loss, train_avg_q = train_fn(
+                model, train_loader, optimizer, device, args.gamma, args.target_update_freq
             )
 
             val_td_loss, val_cql_loss, val_total_loss, val_avg_q = val_cql(

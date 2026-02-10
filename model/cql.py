@@ -22,6 +22,10 @@ class CQL(nn.Module):
         # Frozen CNN (pretrained)
         self.cnn = cnn
 
+        # CRITICAL: Ensure CNN is frozen to prevent target instability
+        for param in self.cnn.parameters():
+            param.requires_grad = False
+
         # Q-network: 3136 -> 512 -> 6 (randomly initialized)
         self.q_network = nn.Sequential(
             nn.Linear(3136, 512),
@@ -35,6 +39,9 @@ class CQL(nn.Module):
         # Freeze target network
         for param in self.q_network_target.parameters():
             param.requires_grad = False
+
+        # Training step counter (for target network updates)
+        self.training_step = 0
 
     def forward(self, state):
         features = self.cnn(state)
@@ -55,7 +62,7 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_update_freq=1000):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=1000):
     model.train()
     total_td_loss = 0
     total_cql_loss = 0
@@ -64,12 +71,19 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_u
     total_samples = 0
 
     for batch in dataloader:
-        step += 1
+        model.training_step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
         reward = batch['reward'].to(device).float() / 10.0  # Reward scaling
         next_state = batch['next_state'].to(device).float() / 255.0
         done = batch['done'].to(device).float()
+
+        # Fix dimensions: ensure all tensors are 1D to prevent broadcasting bugs
+        # reward, done are usually (Batch, 1) from dataloader -> squeeze to (Batch,)
+        if reward.dim() == 2:
+            reward = reward.squeeze(1)
+        if done.dim() == 2:
+            done = done.squeeze(1)
 
         # Convert one-hot action to class index
         if action.dim() == 2:
@@ -79,13 +93,15 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_u
 
         # Forward pass
         q_values = model(state)
-        q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+        q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
         # Compute target Q-value
         with torch.no_grad():
+            # NOTE: Using online CNN here. Safe because CNN is frozen in __init__
             next_features = model.cnn(next_state)
             next_q_values = model.q_network_target(next_features)
-            next_q_value = next_q_values.max(dim=1)[0]
+            next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
+            # Now all are (Batch,): reward, done, next_q_value
             target_q = reward + gamma * next_q_value * (1 - done)
 
         # TD loss (Huber loss for stability)
@@ -107,7 +123,7 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_u
         optimizer.step()
 
         # Update target network
-        if step % target_update_freq == 0:
+        if model.training_step % target_update_freq == 0:
             model.update_target()
 
         # Statistics
@@ -122,7 +138,7 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, step=0, target_u
     avg_total_loss = total_loss_sum / total_samples
     avg_q_value = total_q_value / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, step
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
 
 
 def val_cql(model, dataloader, device, gamma=0.99):
@@ -142,6 +158,12 @@ def val_cql(model, dataloader, device, gamma=0.99):
             next_state = batch['next_state'].to(device).float() / 255.0
             done = batch['done'].to(device).float()
 
+            # Fix dimensions: ensure all tensors are 1D to prevent broadcasting bugs
+            if reward.dim() == 2:
+                reward = reward.squeeze(1)
+            if done.dim() == 2:
+                done = done.squeeze(1)
+
             # Convert one-hot action to class index
             if action.dim() == 2:
                 action_idx = action.argmax(dim=-1)
@@ -150,12 +172,12 @@ def val_cql(model, dataloader, device, gamma=0.99):
 
             # Forward pass
             q_values = model(state)
-            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
             # Compute target Q-value
             next_features = model.cnn(next_state)
             next_q_values = model.q_network_target(next_features)
-            next_q_value = next_q_values.max(dim=1)[0]
+            next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
             target_q = reward + gamma * next_q_value * (1 - done)
 
             # TD loss
