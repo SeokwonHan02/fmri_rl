@@ -75,7 +75,14 @@ class DQN(nn.Module):
         return action.item() if action.numel() == 1 else action
 
 
-def load_pretrained_cnn(pretrained_path, freeze=True, freeze_conv12_only=False):
+def load_pretrained_cnn(pretrained_path, freeze=True):
+    """
+    Load pretrained DQN CNN encoder
+
+    Args:
+        pretrained_path: Path to pretrained DQN checkpoint
+        freeze: Always True (encoder always frozen)
+    """
     cnn = DQN_CNN()
 
     try:
@@ -116,26 +123,12 @@ def load_pretrained_cnn(pretrained_path, freeze=True, freeze_conv12_only=False):
         print(f"✗ Error loading pretrained CNN: {e}")
         raise
 
-    # Freeze encoder layers as specified
-    if freeze:
-        for param in cnn.parameters():
-            param.requires_grad = False
-        print(f"✓ CNN frozen (all conv layers frozen)")
-    elif freeze_conv12_only:
-        # Freeze Conv1 (cnn.0) and Conv2 (cnn.2), keep Conv3 (cnn.4) trainable
-        for param in cnn.cnn[0].parameters():  # Conv1
-            param.requires_grad = False
-        for param in cnn.cnn[2].parameters():  # Conv2
-            param.requires_grad = False
-        # Explicitly ensure Conv3 is trainable (in case checkpoint had it frozen)
-        for param in cnn.cnn[4].parameters():  # Conv3
-            param.requires_grad = True
-        print(f"✓ Conv1 and Conv2 frozen, Conv3 trainable")
-    else:
-        # FIX: Explicitly set requires_grad=True for all parameters
-        # Checkpoint may have been saved with requires_grad=False, so we need to override
-        for param in cnn.parameters():
-            param.requires_grad = True
-        print(f"✓ CNN unfrozen (all conv layers trainable)")
+    # Always freeze encoder
+    if not freeze:
+        raise ValueError("Encoder must always be frozen (freeze=True)")
+
+    for param in cnn.parameters():
+        param.requires_grad = False
+    print(f"✓ CNN frozen (all conv layers)")
 
     return cnn

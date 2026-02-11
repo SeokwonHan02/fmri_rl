@@ -5,7 +5,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 from dataset import create_train_val_dataloaders
-from model import load_pretrained_cnn, BCQ, CQL, BehaviorCloning
+from model import BCQ, CQL, BehaviorCloning
 
 
 def action_to_fire_move(action):
@@ -41,8 +41,8 @@ def get_validation_args():
     parser.add_argument('--subject', type=str, default='sub_1',
                         choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'],
                         help='Which subject data to use')
-    parser.add_argument('--val-split', type=float, default=0.1,
-                        help='Validation split ratio (default: 0.1 = 10%)')
+    parser.add_argument('--val-file-idx', type=int, default=10,
+                        help='Index of file to use for validation (0-10 for 11 files, default: 10 = last file)')
 
     # Model paths
     parser.add_argument('--dqn-path', type=str,
@@ -107,7 +107,7 @@ def validate_agreement(args):
     print("="*80)
     print(f"Subject: {args.subject}")
     print(f"Device: {device}")
-    print(f"Validation split: {args.val_split*100:.1f}%")
+    print(f"Validation file index: {args.val_file_idx}")
     print(f"Models to evaluate: {', '.join(args.models)}")
     print("="*80)
 
@@ -119,43 +119,38 @@ def validate_agreement(args):
             batch_size=args.batch_size,
             subject=args.subject,
             num_workers=args.num_workers,
-            val_split=args.val_split
+            val_file_idx=args.val_file_idx
         )
         print(f"Validation set ready ({len(val_loader.dataset)} samples)")
     except Exception as e:
         print(f"Failed to load data: {e}")
         return
 
-    # 2. Load pretrained CNN
-    print("\n[2/3] Loading pretrained CNN...")
-    try:
-        cnn = load_pretrained_cnn(args.dqn_path).to(device)
-        print(f"CNN loaded from {args.dqn_path}")
-    except Exception as e:
-        print(f"Failed to load CNN: {e}")
-        return
-
-    # 3. Load models
-    print("\n[3/3] Loading trained models...")
+    # 2. Load models
+    # Note: We create a temporary CNN for model initialization
+    # The actual CNN parameters will be loaded from model checkpoints
+    print("\n[2/3] Loading trained models...")
+    from model.dqn import DQN
+    temp_cnn = DQN(action_dim=args.action_dim).cnn.to(device)  # Temporary CNN (will be overwritten)
     models = {}
 
     if 'bc' in args.models:
         print("  Loading BC (Behavior Cloning)...")
-        bc_model = load_model(args.bc_path, BehaviorCloning, cnn,
+        bc_model = load_model(args.bc_path, BehaviorCloning, temp_cnn,
                              args.action_dim, device)
         if bc_model is not None:
             models['bc'] = bc_model
 
     if 'cql' in args.models:
         print("  Loading CQL (Conservative Q-Learning)...")
-        cql_model = load_model(args.cql_path, CQL, cnn,
+        cql_model = load_model(args.cql_path, CQL, temp_cnn,
                               args.action_dim, device)
         if cql_model is not None:
             models['cql'] = cql_model
 
     if 'bcq' in args.models:
         print("  Loading BCQ (Batch-Constrained Q-Learning)...")
-        bcq_model = load_model(args.bcq_path, BCQ, cnn,
+        bcq_model = load_model(args.bcq_path, BCQ, temp_cnn,
                               args.action_dim, device)
         if bcq_model is not None:
             models['bcq'] = bcq_model

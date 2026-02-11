@@ -18,17 +18,13 @@ def get_args():
                         help='Batch size for training')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
+    parser.add_argument('--val-file-idx', type=int, default=10,
+                        help='Index of file to use for validation (0-10 for 11 files, default: 10 = last file)')
 
     # Model
     parser.add_argument('--dqn-path', type=str,
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
-                        help='Path to pretrained DQN parameters')
-    parser.add_argument('--freeze-encoder', action='store_true',
-                        help='Freeze entire DQN encoder (all conv layers)')
-    parser.add_argument('--freeze-conv12-only', action='store_true',
-                        help='Freeze only Conv1 and Conv2, unfreeze Conv3')
-    parser.add_argument('--encoder-lr', type=float, default=1e-5,
-                        help='Learning rate for encoder when not frozen')
+                        help='Path to pretrained DQN parameters (encoder always frozen)')
 
     # Training
     parser.add_argument('--epochs', type=int, default=10,
@@ -50,13 +46,7 @@ def get_args():
     parser.add_argument('--bcq-threshold', type=float, default=0.3,
                         help='BCQ action filtering threshold')
     parser.add_argument('--bc-path', type=str, default='',
-                        help='Path to pretrained BC model for BCQ initialization')
-    parser.add_argument('--bcq-freeze-bc', action='store_true',
-                        help='Freeze BC network in BCQ (default: False, allow BC to continue learning)')
-    parser.add_argument('--bcq-bc-weight', type=float, default=5.0,
-                        help='Weight for BC loss in BCQ (relative to Q loss). '
-                             'Typical Q loss: 1-5, BC loss: 0.1-0.5, so use 5-10 to balance. '
-                             'Set to 0 to disable BC loss (pure Q-learning with BC constraint).')
+                        help='Path to pretrained BC model for BCQ initialization (BC network always frozen)')
 
     # BC and BCQ behavior cloning
     parser.add_argument('--label-smoothing', type=float, default=0.0,

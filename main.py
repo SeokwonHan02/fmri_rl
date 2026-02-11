@@ -90,10 +90,6 @@ def main():
     args = get_args()
     set_seed(args.seed)
 
-    # Validate freeze options
-    if args.freeze_encoder and args.freeze_conv12_only:
-        raise ValueError("Cannot use both --freeze-encoder and --freeze-conv12-only. Choose one.")
-
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -108,17 +104,13 @@ def main():
         batch_size=args.batch_size,
         subject=args.subject,
         num_workers=args.num_workers,
-        val_split=1.0/11  # 11개 중 1개
+        val_file_idx=args.val_file_idx
     )
     print(f"Train batches per epoch: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
 
-    print("\nLoading pretrained DQN CNN...")
-    cnn = load_pretrained_cnn(
-        args.dqn_path,
-        freeze=args.freeze_encoder,
-        freeze_conv12_only=args.freeze_conv12_only
-    )
+    print("\nLoading pretrained DQN CNN (frozen)...")
+    cnn = load_pretrained_cnn(args.dqn_path, freeze=True)
     cnn = cnn.to(device)
 
     # Create model based on algorithm
@@ -140,15 +132,12 @@ def main():
             print("\nNo class weighting (exponent=0.0)")
 
     elif args.algo == 'bcq':
-        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold,
-                    bc_path=args.bc_path, freeze_bc=args.bcq_freeze_bc, bc_weight=args.bcq_bc_weight,
-                    freeze_encoder=args.freeze_encoder, freeze_conv12_only=args.freeze_conv12_only)
+        model = BCQ(cnn, action_dim=6, threshold=args.bcq_threshold, bc_path=args.bc_path)
         train_fn = train_bcq
         val_fn = val_bcq
 
     elif args.algo == 'cql':
-        model = CQL(cnn, action_dim=6, alpha=args.cql_alpha,
-                    freeze_encoder=args.freeze_encoder, freeze_conv12_only=args.freeze_conv12_only)
+        model = CQL(cnn, action_dim=6, alpha=args.cql_alpha)
         train_fn = train_cql
         val_fn = val_cql
 
@@ -157,36 +146,12 @@ def main():
 
     model = model.to(device)
 
-    # Optimizer with separate learning rates for encoder and other parameters
-    if args.freeze_encoder:
-        # All encoder frozen, only optimize non-encoder parameters
-        optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.lr
-        )
-        print(f"Optimizer: Single LR={args.lr:.2e} (entire encoder frozen)")
-    elif args.freeze_conv12_only:
-        # Conv1, Conv2 frozen, Conv3 trainable with encoder_lr
-        conv3_params = list(model.cnn.cnn[4].parameters())  # Conv3
-        conv3_param_ids = [id(p) for p in conv3_params]
-        other_params = [p for p in model.parameters() if id(p) not in conv3_param_ids and p.requires_grad]
-
-        optimizer = optim.Adam([
-            {'params': conv3_params, 'lr': args.encoder_lr},
-            {'params': other_params, 'lr': args.lr}
-        ])
-        print(f"Optimizer: Conv3 LR={args.encoder_lr:.2e}, Other LR={args.lr:.2e} (Conv1/Conv2 frozen)")
-    else:
-        # All encoder trainable with encoder_lr
-        encoder_params = list(model.cnn.parameters())
-        encoder_param_ids = [id(p) for p in encoder_params]
-        other_params = [p for p in model.parameters() if id(p) not in encoder_param_ids and p.requires_grad]
-
-        optimizer = optim.Adam([
-            {'params': encoder_params, 'lr': args.encoder_lr},
-            {'params': other_params, 'lr': args.lr}
-        ])
-        print(f"Optimizer: Encoder LR={args.encoder_lr:.2e}, Other LR={args.lr:.2e}")
+    # Optimizer (encoder is always frozen, only optimize trainable parameters)
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr
+    )
+    print(f"Optimizer: LR={args.lr:.2e} (encoder frozen)")
 
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -220,19 +185,18 @@ def main():
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'bcq':
-            train_q_loss, train_bc_loss, train_bc_accuracy, train_avg_q = train_fn(
-                model, train_loader, optimizer, device, args.gamma, args.target_update_freq,
-                args.label_smoothing, args.reward_scale
+            train_q_loss, train_avg_q = train_fn(
+                model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_q_loss, val_bc_loss, val_bc_accuracy, val_avg_q = val_fn(
-                model, val_loader, device, args.gamma, args.label_smoothing, args.reward_scale
+            val_q_loss, val_avg_q = val_fn(
+                model, val_loader, device, args.gamma, args.reward_scale
             )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
-                f"  Train - Q Loss: {train_q_loss:.4f}, BC Loss: {train_bc_loss:.4f}, BC Acc: {train_bc_accuracy:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                f"  Val   - Q Loss: {val_q_loss:.4f}, BC Loss: {val_bc_loss:.4f}, BC Acc: {val_bc_accuracy:.4f}, Avg Q: {val_avg_q:.2f}"
+                f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}"
             )
 
             # Save model every save_interval epochs

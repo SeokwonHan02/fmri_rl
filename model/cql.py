@@ -11,31 +11,17 @@ class CQL(nn.Module):
     Adds a conservative regularization term to standard Q-learning
     to prevent overestimation of out-of-distribution actions
     """
-    def __init__(self, cnn, action_dim=6, alpha=1.0, freeze_encoder=True, freeze_conv12_only=False):
+    def __init__(self, cnn, action_dim=6, alpha=0.2):
         super(CQL, self).__init__()
 
         self.action_dim = action_dim
         self.alpha = alpha  # CQL regularization weight
 
-        # CNN with configurable freeze options
+        # CNN (always frozen for stability)
         self.cnn = cnn
-
-        # Freeze CNN based on options (default: freeze entire CNN for stability)
-        if freeze_encoder:
-            # Freeze entire CNN (recommended for stability)
-            for param in self.cnn.parameters():
-                param.requires_grad = False
-            print("✓ CQL CNN: All conv layers frozen")
-        elif freeze_conv12_only:
-            # Freeze Conv1 and Conv2, keep Conv3 trainable
-            for param in self.cnn.cnn[0].parameters():  # Conv1
-                param.requires_grad = False
-            for param in self.cnn.cnn[2].parameters():  # Conv2
-                param.requires_grad = False
-            print("✓ CQL CNN: Conv1 and Conv2 frozen, Conv3 trainable")
-        else:
-            # All CNN trainable (use with caution - may cause instability)
-            print("✓ CQL CNN: All conv layers trainable")
+        for param in self.cnn.parameters():
+            param.requires_grad = False
+        print("✓ CQL CNN: All conv layers frozen")
 
         # Q-network: 3136 -> 512 -> 6 (randomly initialized)
         self.q_network = nn.Sequential(

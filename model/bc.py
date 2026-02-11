@@ -14,7 +14,11 @@ class BehaviorCloning(nn.Module):
     def __init__(self, cnn, action_dim=6):
         super(BehaviorCloning, self).__init__()
 
+        # CNN (always frozen for stability)
         self.cnn = cnn
+        for param in self.cnn.parameters():
+            param.requires_grad = False
+
         self.action_dim = action_dim
 
         # Action head: 3136 -> 512 -> 6
@@ -23,6 +27,7 @@ class BehaviorCloning(nn.Module):
             nn.ReLU(),
             nn.Linear(512, action_dim)
         )
+        print("✓ BC CNN: All conv layers frozen")
 
     def forward(self, state):
         features = self.cnn(state)  # (batch, 3136)

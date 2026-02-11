@@ -52,8 +52,8 @@ def get_args():
                         help='Batch size for data loading (for agreement validation)')
     parser.add_argument('--num-workers', type=int, default=0,
                         help='Number of data loading workers (for agreement validation)')
-    parser.add_argument('--val-split', type=float, default=0.1,
-                        help='Validation split ratio (for agreement validation)')
+    parser.add_argument('--val-file-idx', type=int, default=10,
+                        help='Index of file to use for validation (0-10 for 11 files, default: 10 = last file)')
 
     return parser.parse_args()
 
@@ -206,7 +206,7 @@ def evaluate_dqn_qvalue(model, env_name, device, num_episodes=10, seed=0, termin
     return results
 
 
-def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, device, val_split=0.1):
+def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, device, val_file_idx=10):
     """
     Validate DQN agreement with human actions on offline dataset
 
@@ -217,7 +217,7 @@ def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, de
         batch_size: Batch size for data loading
         num_workers: Number of data loading workers
         device: Device to run evaluation on
-        val_split: Validation split ratio
+        val_file_idx: Index of file to use for validation
 
     Returns:
         Dictionary with agreement statistics
@@ -227,7 +227,7 @@ def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, de
     print("="*80)
     print(f"Subject: {subject}")
     print(f"Device: {device}")
-    print(f"Validation split: {val_split*100:.1f}%")
+    print(f"Validation file index: {val_file_idx}")
     print("="*80)
 
     # Load validation data
@@ -238,7 +238,7 @@ def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, de
             batch_size=batch_size,
             subject=subject,
             num_workers=num_workers,
-            val_split=val_split
+            val_file_idx=val_file_idx
         )
         print(f"✓ Validation set ready ({len(val_loader.dataset)} samples)")
     except Exception as e:
@@ -361,7 +361,7 @@ def main():
         print(f"Checkpoint: {args.dqn_path}")
         print(f"Data directory: {args.data_dir}")
         print(f"Subject: {args.subject}")
-        print(f"Validation split: {args.val_split*100:.1f}%")
+        print(f"Validation file index: {args.val_file_idx}")
         print(f"Device: {device}")
         print("="*80)
 
@@ -373,7 +373,7 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 device=device,
-                val_split=args.val_split
+                val_file_idx=args.val_file_idx
             )
         except Exception as e:
             print(f"✗ Agreement validation failed: {e}")

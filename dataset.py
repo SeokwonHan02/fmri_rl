@@ -122,9 +122,16 @@ def create_dataloader(data_dir, batch_size, subject, num_workers=4, shuffle=True
     return dataloader
 
 
-def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, val_split=0.1):
+def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, val_file_idx=10):
     """
     Create train and validation dataloaders by splitting files
+
+    Args:
+        data_dir: Base directory containing processed data
+        batch_size: Batch size for training
+        subject: Subject ID (e.g., 'sub_1')
+        num_workers: Number of data loading workers
+        val_file_idx: Index of file to use for validation (0-based)
     """
     # Find all npz files
     subject_dir = Path(data_dir) / subject
@@ -137,18 +144,19 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, v
     if n_files == 0:
         raise ValueError(f"No npz files found in {subject_dir}")
 
-    # Calculate split
-    n_val = max(1, int(n_files * val_split))
-    n_train = n_files - n_val
+    # Validate val_file_idx
+    if val_file_idx < 0 or val_file_idx >= n_files:
+        raise ValueError(f"val_file_idx={val_file_idx} out of range [0, {n_files-1}]")
 
     print(f"\nSplitting data:")
     print(f"  Total files: {n_files}")
-    print(f"  Train files: {n_train}")
-    print(f"  Val files: {n_val}")
+    print(f"  Validation file index: {val_file_idx}")
+    print(f"  Validation file: {Path(npz_files[val_file_idx]).name}")
+    print(f"  Train files: {n_files - 1}")
 
-    # Split files (last n_val files for validation)
-    train_files = npz_files[:n_train]
-    val_files = npz_files[n_train:]
+    # Split files (use specified index for validation)
+    val_files = [npz_files[val_file_idx]]
+    train_files = npz_files[:val_file_idx] + npz_files[val_file_idx+1:]
 
     # Create datasets using the npz_files parameter
     print(f"\nLoading training data...")

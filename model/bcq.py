@@ -10,36 +10,20 @@ class BCQ(nn.Module):
 
     Consists of:
     1. Q-network: Estimates Q-values (3136 -> 512 -> 6)
-    2. Imitation network: Learns behavior policy (3136 -> 512 -> 6)
+    2. Imitation network: Pretrained BC for action filtering (frozen)
     3. Target Q-network: For stable Q-learning
     """
-    def __init__(self, cnn, action_dim=6, threshold=0.3, bc_path='', freeze_bc=False, bc_weight=1.0, freeze_encoder=True, freeze_conv12_only=False):
+    def __init__(self, cnn, action_dim=6, threshold=0.3, bc_path=''):
         super(BCQ, self).__init__()
 
         self.action_dim = action_dim
         self.threshold = threshold
-        self.bc_frozen = freeze_bc  # Track if BC network should be frozen (explicit control)
-        self.bc_weight = bc_weight  # Weight for BC loss relative to Q loss
 
-        # CNN with configurable freeze options
+        # CNN (always frozen for stability)
         self.cnn = cnn
-
-        # Freeze CNN based on options (default: freeze entire CNN for stability)
-        if freeze_encoder:
-            # Freeze entire CNN (recommended for stability)
-            for param in self.cnn.parameters():
-                param.requires_grad = False
-            print("✓ BCQ CNN: All conv layers frozen")
-        elif freeze_conv12_only:
-            # Freeze Conv1 and Conv2, keep Conv3 trainable
-            for param in self.cnn.cnn[0].parameters():  # Conv1
-                param.requires_grad = False
-            for param in self.cnn.cnn[2].parameters():  # Conv2
-                param.requires_grad = False
-            print("✓ BCQ CNN: Conv1 and Conv2 frozen, Conv3 trainable")
-        else:
-            # All CNN trainable (use with caution - may cause instability)
-            print("✓ BCQ CNN: All conv layers trainable")
+        for param in self.cnn.parameters():
+            param.requires_grad = False
+        print("✓ BCQ CNN: All conv layers frozen")
 
         # Q-network: 3136 -> 512 -> 6 (randomly initialized)
         self.q_network = nn.Sequential(
@@ -55,7 +39,7 @@ class BCQ(nn.Module):
             nn.Linear(512, action_dim)
         )
 
-        # Load pretrained BC model if provided
+        # Load pretrained BC model if provided (required for training, optional for inference)
         if bc_path:
             print(f"Loading pretrained BC model from: {bc_path}")
             from .bc import BehaviorCloning
@@ -70,17 +54,14 @@ class BCQ(nn.Module):
             # Copy weights from BC's action_head to imitation_network
             self.imitation_network.load_state_dict(temp_bc.action_head.state_dict())
 
-            # FIX BUG #1: Only freeze if explicitly requested
-            if freeze_bc:
-                for param in self.imitation_network.parameters():
-                    param.requires_grad = False
-                print("BC network loaded and frozen (freeze_bc=True)")
-            else:
-                print("BC network loaded but unfrozen (freeze_bc=False) - will continue learning")
+            print("✓ BC network loaded and frozen (used for action filtering only)")
         else:
-            # BC network randomly initialized, always trainable
-            self.bc_frozen = False
-            print("BC network randomly initialized and trainable")
+            # BC network randomly initialized (will be loaded from checkpoint later)
+            print("⚠ BC network randomly initialized (should load from checkpoint)")
+
+        # Freeze BC network (always frozen, not trained)
+        for param in self.imitation_network.parameters():
+            param.requires_grad = False
 
         # Target Q-network (CNN is frozen)
         self.q_network_target = copy.deepcopy(self.q_network)
@@ -126,11 +107,12 @@ class BCQ(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, label_smoothing=0.0, reward_scale=0.1):
+def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1):
+    """
+    Train BCQ model (BC network is frozen, only Q-network is trained)
+    """
     model.train()
     total_q_loss = 0
-    total_bc_loss = 0
-    total_bc_correct = 0
     total_q_value = 0
     total_samples = 0
 
@@ -159,8 +141,8 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         else:
             action_idx = action
 
-        # Forward pass
-        q_values, imitation_logits = model(state)
+        # Forward pass (imitation_logits not used in training, BC is frozen)
+        q_values, _ = model(state)
         q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
         # Compute target Q-value
@@ -191,53 +173,31 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         # Q-learning loss (Huber loss for stability)
         q_loss = F.smooth_l1_loss(q_value, target_q)
 
-        # Behavior cloning loss with label smoothing (only if BC is not frozen)
-        if model.bc_frozen:
-            bc_loss = torch.tensor(0.0, device=q_loss.device)
-            total_loss = q_loss
-        else:
-            # FIX BUG #6: Scale BC loss to be comparable to Q loss
-            # Q loss is typically 1-5, BC loss is 0.1-0.5, so BC gets ignored
-            # bc_weight=5-10 makes BC loss contribute meaningfully
-            bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
-            total_loss = q_loss + model.bc_weight * bc_loss
-
-        # Single backward and optimizer step
+        # Backward and optimizer step (BC network is frozen, only Q-network trained)
         optimizer.zero_grad()
-        total_loss.backward()
+        q_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
         # Update target network periodically for stable Q-learning
-        # FIX BUG #2: Reduced default from 1000 to 100 for offline RL stability
-        # Too high = stale targets, training instability
-        # Too low = moving target, slow convergence
-        # Typical range: 100-250 for offline settings
         if model.training_step % target_update_freq == 0:
             model.update_target()
 
         # Statistics
         total_q_loss += q_loss.item() * state.size(0)
-        total_bc_loss += bc_loss.item() * state.size(0)
-        pred = imitation_logits.argmax(dim=-1)
-        total_bc_correct += (pred == action_idx).sum().item()
         total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
 
     avg_q_loss = total_q_loss / total_samples
-    avg_bc_loss = total_bc_loss / total_samples
-    avg_bc_accuracy = total_bc_correct / total_samples
     avg_q_value = total_q_value / total_samples
 
-    return avg_q_loss, avg_bc_loss, avg_bc_accuracy, avg_q_value
+    return avg_q_loss, avg_q_value
 
 
-def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0, reward_scale=0.1):
-    """Validation function for BCQ with detailed metrics"""
+def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1):
+    """Validation function for BCQ (BC network is frozen)"""
     model.eval()
     total_q_loss = 0
-    total_bc_loss = 0
-    total_bc_correct = 0
     total_q_value = 0
     total_samples = 0
 
@@ -261,8 +221,8 @@ def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0, reward_s
             else:
                 action_idx = action
 
-            # Forward pass
-            q_values, imitation_logits = model(state)
+            # Forward pass (imitation_logits not used in validation)
+            q_values, _ = model(state)
             q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
             # Compute target Q-value
@@ -289,23 +249,12 @@ def val_bcq(model, dataloader, device, gamma=0.99, label_smoothing=0.0, reward_s
             # Q-learning loss
             q_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # Behavior cloning loss with label smoothing (only if BC is not frozen)
-            if model.bc_frozen:
-                bc_loss = torch.tensor(0.0, device=q_loss.device)
-            else:
-                bc_loss = F.cross_entropy(imitation_logits, action_idx, label_smoothing=label_smoothing)
-
             # Statistics
             total_q_loss += q_loss.item() * state.size(0)
-            total_bc_loss += bc_loss.item() * state.size(0)
-            pred = imitation_logits.argmax(dim=-1)
-            total_bc_correct += (pred == action_idx).sum().item()
             total_q_value += q_values.mean().item() * state.size(0)
             total_samples += state.size(0)
 
     avg_q_loss = total_q_loss / total_samples
-    avg_bc_loss = total_bc_loss / total_samples
-    avg_bc_accuracy = total_bc_correct / total_samples
     avg_q_value = total_q_value / total_samples
 
-    return avg_q_loss, avg_bc_loss, avg_bc_accuracy, avg_q_value
+    return avg_q_loss, avg_q_value
