@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import random
 import gymnasium as gym
 from gymnasium.wrappers import AtariPreprocessing, FrameStackObservation
 
@@ -38,7 +39,7 @@ def make_atari_env(env_name='SpaceInvadersNoFrameskip-v4', seed=0):
     return env
 
 
-def evaluate_agent(model, env_name, device, num_episodes=10, seed=0, deterministic=True):
+def evaluate_agent(model, env_name, device, num_episodes=10, seed=None, deterministic=True):
     """
     Evaluate an agent in the real environment
 
@@ -47,12 +48,16 @@ def evaluate_agent(model, env_name, device, num_episodes=10, seed=0, determinist
         env_name: Name of the environment
         device: Device to run evaluation on
         num_episodes: Number of episodes to run
-        seed: Random seed for environment
+        seed: Random seed for environment (default: random)
         deterministic: Whether to use deterministic action selection
 
     Returns:
         Dictionary with mean, std, min, max rewards
     """
+    # Generate random seed if not specified
+    if seed is None:
+        seed = random.randint(0, 999999)
+
     # Create environment
     env = make_atari_env(env_name, seed)
 
@@ -62,7 +67,9 @@ def evaluate_agent(model, env_name, device, num_episodes=10, seed=0, determinist
     model.eval()
 
     for episode in range(num_episodes):
-        state, info = env.reset()
+        # Generate unique seed for each episode
+        episode_seed = seed + episode
+        state, info = env.reset(seed=episode_seed)
         episode_reward = 0
         episode_length = 0
         done = False
