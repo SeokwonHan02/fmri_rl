@@ -127,30 +127,32 @@ def validate_agreement(args):
         return
 
     # 2. Load models
-    # Note: We create a temporary CNN for model initialization
-    # The actual CNN parameters will be loaded from model checkpoints
-    print("\n[2/3] Loading trained models...")
-    from model.dqn import DQN
-    temp_cnn = DQN(action_dim=args.action_dim).cnn.to(device)  # Temporary CNN (will be overwritten)
+    # Load pretrained DQN CNN (frozen encoder)
+    print("\n[2/3] Loading pretrained DQN CNN...")
+    from model.dqn import load_pretrained_cnn
+    cnn = load_pretrained_cnn(args.dqn_path, freeze=True).to(device)
+    print("✓ CNN loaded")
+
+    print("\nLoading trained models...")
     models = {}
 
     if 'bc' in args.models:
         print("  Loading BC (Behavior Cloning)...")
-        bc_model = load_model(args.bc_path, BehaviorCloning, temp_cnn,
+        bc_model = load_model(args.bc_path, BehaviorCloning, cnn,
                              args.action_dim, device)
         if bc_model is not None:
             models['bc'] = bc_model
 
     if 'cql' in args.models:
         print("  Loading CQL (Conservative Q-Learning)...")
-        cql_model = load_model(args.cql_path, CQL, temp_cnn,
+        cql_model = load_model(args.cql_path, CQL, cnn,
                               args.action_dim, device)
         if cql_model is not None:
             models['cql'] = cql_model
 
     if 'bcq' in args.models:
         print("  Loading BCQ (Batch-Constrained Q-Learning)...")
-        bcq_model = load_model(args.bcq_path, BCQ, temp_cnn,
+        bcq_model = load_model(args.bcq_path, BCQ, cnn,
                               args.action_dim, device)
         if bcq_model is not None:
             models['bcq'] = bcq_model
