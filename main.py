@@ -230,12 +230,27 @@ def main():
             tqdm.write(f"EVALUATION at Epoch {epoch}")
             tqdm.write(f"{'='*80}")
 
-            eval_stats = evaluate_agent(model, args.env_name, device, args.eval_episodes, args.seed + epoch, args.deterministic)
-            tqdm.write(
+            # Track masking statistics for BCQ
+            track_masking = (args.algo == 'bcq')
+            eval_stats = evaluate_agent(
+                model, args.env_name, device, args.eval_episodes,
+                args.seed + epoch, args.deterministic, track_masking=track_masking
+            )
+
+            eval_output = (
                 f"  Eval - Mean Reward: {eval_stats['mean_reward']:.2f} ± {eval_stats['std_reward']:.2f}\n"
                 f"         Min: {eval_stats['min_reward']:.1f}, Max: {eval_stats['max_reward']:.1f}\n"
                 f"         Mean Length: {eval_stats['mean_length']:.1f}"
             )
+
+            # Add masking statistics for BCQ
+            if 'mean_allowed_actions' in eval_stats:
+                eval_output += (
+                    f"\n         BCQ Masking - Mean Allowed: {eval_stats['mean_allowed_actions']:.2f} / 6 actions"
+                    f"\n                       Std: {eval_stats['std_allowed_actions']:.2f}"
+                )
+
+            tqdm.write(eval_output)
             tqdm.write(f"{'='*80}\n")
 
     print("\n" + "="*80)

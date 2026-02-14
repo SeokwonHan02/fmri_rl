@@ -120,15 +120,11 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         model.training_step += 1
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
-        # FIX BUG #7: Document reward scaling rationale
-        # Space Invaders rewards: 10-200 (kill alien), need scaling for stable Q-learning
-        # Without scaling, rewards dominate TD error, preventing Q-network from learning value function
-        # Scale=0.1 brings rewards to 1-20 range, comparable to typical Q-values (0-50)
         reward = batch['reward'].to(device).float() * reward_scale
         next_state = batch['next_state'].to(device).float() / 255.0
         done = batch['done'].to(device).float()
 
-        # Fix dimensions: ensure all tensors are 1D to prevent broadcasting bugs
+        # Ensure all tensors are 1D to prevent broadcasting bugs
         # reward, done are usually (Batch, 1) from dataloader -> squeeze to (Batch,)
         if reward.dim() == 2:
             reward = reward.squeeze(1)
