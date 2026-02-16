@@ -38,8 +38,10 @@ def get_args():
                         help='Path to trained BCQ model')
 
     # Other
-    parser.add_argument('--bcq-threshold', type=float, default = 0.3,
+    parser.add_argument('--bcq-threshold', type=float, default = 0.04,
                         help='Threshold for action selection')
+    parser.add_argument('--bcq-masked-z-score', type=float, default=-3.0,
+                        help='Z-score value assigned to masked BCQ actions')
     parser.add_argument('--batch-size', type=int, default=256,
                         help='Batch size for processing')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -99,7 +101,7 @@ def load_models(args, device):
     return dqn, bc, cql, bcq
 
 
-def compute_z_scores(state, action, dqn, bc, cql, bcq):
+def compute_z_scores(state, action, dqn, bc, cql, bcq, masked_z_value=-3.0):
     """
     Compute Z-scores for human-selected actions across all models
 
@@ -112,6 +114,7 @@ def compute_z_scores(state, action, dqn, bc, cql, bcq):
         state: (batch, 4, 84, 84) tensor
         action: (batch,) or (batch, 6) tensor
         dqn, bc, cql, bcq: model instances
+        masked_z_value: Z-score value assigned to masked BCQ actions (default: -3.0)
 
     Returns:
         dict with z_scores for each model
@@ -171,7 +174,7 @@ def compute_z_scores(state, action, dqn, bc, cql, bcq):
         bcq_std = torch.sqrt(masked_q_var) + eps  # (batch, 1)
 
         bcq_z = (bcq_q - bcq_mean) / bcq_std  # (batch, 6)
-        bcq_z = torch.where(mask, bcq_z, torch.full_like(bcq_z, -10.0))
+        bcq_z = torch.where(mask, bcq_z, torch.full_like(bcq_z, masked_z_value))
 
         bcq_z_human = bcq_z.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (batch,)
 
@@ -193,6 +196,7 @@ def main():
     print("="*80)
     print(f"Subject: {args.subject}")
     print(f"Validation file index: {args.val_file_idx}")
+    print(f"BCQ masked Z-score value: {args.bcq_masked_z_score}")
     print(f"Device: {device}")
     print("="*80 + "\n")
 
@@ -221,7 +225,8 @@ def main():
         state = batch['state'].to(device).float() / 255.0
         action = batch['action'].to(device)
 
-        results = compute_z_scores(state, action, dqn, bc, cql, bcq)
+        results = compute_z_scores(state, action, dqn, bc, cql, bcq,
+                                   masked_z_value=args.bcq_masked_z_score)
 
         all_dqn_z.append(results['dqn_z'].cpu())
         all_bc_z.append(results['bc_z'].cpu())
@@ -233,6 +238,11 @@ def main():
     bc_z = torch.cat(all_bc_z).numpy()
     cql_z = torch.cat(all_cql_z).numpy()
     bcq_z = torch.cat(all_bcq_z).numpy()
+
+    # Filter out masked actions from BCQ Z-scores (masked actions have Z-score = args.bcq_masked_z_score)
+    # Use a small epsilon to avoid floating point comparison issues
+    masked_threshold = args.bcq_masked_z_score + 0.1
+    bcq_z_unmasked = bcq_z[bcq_z > masked_threshold]
 
     print(f"✓ Computed Z-scores for {len(dqn_z):,} samples\n")
 
@@ -250,7 +260,72 @@ def main():
     print(f"  Z_DQN:  mean={np.mean(dqn_z):.4f}, std={np.std(dqn_z):.4f}")
     print(f"  Z_BC:   mean={np.mean(bc_z):.4f}, std={np.std(bc_z):.4f}")
     print(f"  Z_CQL:  mean={np.mean(cql_z):.4f}, std={np.std(cql_z):.4f}")
-    print(f"  Z_BCQ:  mean={np.mean(bcq_z):.4f}, std={np.std(bcq_z):.4f}")
+    print(f"  Z_BCQ:  mean={np.mean(bcq_z):.4f}, std={np.std(bcq_z):.4f} (all samples)")
+    print(f"          mean={np.mean(bcq_z_unmasked):.4f}, std={np.std(bcq_z_unmasked):.4f}, min={np.min(bcq_z_unmasked):.4f}, max={np.max(bcq_z_unmasked):.4f} (unmasked only, {len(bcq_z_unmasked)}/{len(bcq_z)} samples)")
+
+    # Z-score correlations
+    print("\n" + "="*80)
+    print("Z-SCORE CORRELATIONS (Cross-Model Analysis)")
+    print("="*80)
+
+    # Create correlation matrix (using all samples including masked for BCQ)
+    z_scores_all = np.vstack([dqn_z, bc_z, cql_z, bcq_z])
+    z_corr_all = np.corrcoef(z_scores_all)
+
+    z_names = ['Z_DQN', 'Z_BC', 'Z_CQL', 'Z_BCQ']
+    print("\nCorrelation Matrix - All Samples (Pearson):")
+    print(f"{'':>12s}", end='')
+    for name in z_names:
+        print(f"{name:>12s}", end='')
+    print()
+    print("-"*60)
+
+    for i, name in enumerate(z_names):
+        print(f"{name:>12s}", end='')
+        for j in range(len(z_names)):
+            print(f"{z_corr_all[i, j]:>12.4f}", end='')
+        print()
+
+    # Also compute correlations excluding masked BCQ actions
+    bcq_unmasked_mask = bcq_z > masked_threshold
+    bcq_masked_mask = bcq_z <= masked_threshold
+
+    dqn_z_filtered = dqn_z[bcq_unmasked_mask]
+    bc_z_filtered = bc_z[bcq_unmasked_mask]
+    cql_z_filtered = cql_z[bcq_unmasked_mask]
+    bcq_z_filtered = bcq_z[bcq_unmasked_mask]
+
+    z_scores_unmasked = np.vstack([dqn_z_filtered, bc_z_filtered, cql_z_filtered, bcq_z_filtered])
+    z_corr_unmasked = np.corrcoef(z_scores_unmasked)
+
+    print(f"\nCorrelation Matrix - Unmasked BCQ Samples Only ({len(bcq_z_filtered)}/{len(bcq_z)} samples):")
+    print(f"{'':>12s}", end='')
+    for name in z_names:
+        print(f"{name:>12s}", end='')
+    print()
+    print("-"*60)
+
+    for i, name in enumerate(z_names):
+        print(f"{name:>12s}", end='')
+        for j in range(len(z_names)):
+            print(f"{z_corr_unmasked[i, j]:>12.4f}", end='')
+        print()
+
+    # Analysis: How do other models' Z-scores differ between masked vs unmasked BCQ samples?
+    print(f"\nDiagnostic Analysis - Why does masking affect correlation?")
+    print("-"*80)
+    print(f"Number of masked samples: {bcq_masked_mask.sum():,} ({bcq_masked_mask.sum()/len(bcq_z)*100:.2f}%)")
+    print(f"Number of unmasked samples: {bcq_unmasked_mask.sum():,} ({bcq_unmasked_mask.sum()/len(bcq_z)*100:.2f}%)")
+
+    print(f"\nZ-scores for MASKED BCQ samples:")
+    print(f"  Z_DQN:  mean={np.mean(dqn_z[bcq_masked_mask]):.4f}, std={np.std(dqn_z[bcq_masked_mask]):.4f}")
+    print(f"  Z_BC:   mean={np.mean(bc_z[bcq_masked_mask]):.4f}, std={np.std(bc_z[bcq_masked_mask]):.4f}")
+    print(f"  Z_CQL:  mean={np.mean(cql_z[bcq_masked_mask]):.4f}, std={np.std(cql_z[bcq_masked_mask]):.4f}")
+
+    print(f"\nZ-scores for UNMASKED BCQ samples:")
+    print(f"  Z_DQN:  mean={np.mean(dqn_z[bcq_unmasked_mask]):.4f}, std={np.std(dqn_z[bcq_unmasked_mask]):.4f}")
+    print(f"  Z_BC:   mean={np.mean(bc_z[bcq_unmasked_mask]):.4f}, std={np.std(bc_z[bcq_unmasked_mask]):.4f}")
+    print(f"  Z_CQL:  mean={np.mean(cql_z[bcq_unmasked_mask]):.4f}, std={np.std(cql_z[bcq_unmasked_mask]):.4f}")
 
     print("\nCognitive Indices Statistics:")
     print(f"  I_habit     (BC - DQN):  mean={np.mean(I_habit):.4f}, std={np.std(I_habit):.4f}, "
@@ -259,6 +334,36 @@ def main():
           f"min={np.min(I_pessimism):.4f}, max={np.max(I_pessimism):.4f}")
     print(f"  I_prudence  (BCQ - DQN): mean={np.mean(I_prudence):.4f}, std={np.std(I_prudence):.4f}, "
           f"min={np.min(I_prudence):.4f}, max={np.max(I_prudence):.4f}")
+
+    # Compute correlations between cognitive indices (for multicollinearity check)
+    print("\n" + "="*80)
+    print("COGNITIVE INDICES CORRELATIONS (Multicollinearity Check)")
+    print("="*80)
+
+    # Create correlation matrix
+    indices = np.vstack([I_habit, I_pessimism, I_prudence])
+    corr_matrix = np.corrcoef(indices)
+
+    # Print correlation matrix
+    index_names = ['I_habit', 'I_pessimism', 'I_prudence']
+    print("\nCorrelation Matrix (Pearson):")
+    print(f"{'':>15s}", end='')
+    for name in index_names:
+        print(f"{name:>15s}", end='')
+    print()
+    print("-"*60)
+
+    for i, name in enumerate(index_names):
+        print(f"{name:>15s}", end='')
+        for j in range(len(index_names)):
+            print(f"{corr_matrix[i, j]:>15.4f}", end='')
+        print()
+
+    # Print pairwise correlations
+    print("\nPairwise Correlations:")
+    print(f"  I_habit vs I_pessimism:    r = {corr_matrix[0, 1]:>7.4f}")
+    print(f"  I_habit vs I_prudence:     r = {corr_matrix[0, 2]:>7.4f}")
+    print(f"  I_pessimism vs I_prudence: r = {corr_matrix[1, 2]:>7.4f}")
 
     print("\n" + "="*80)
     print("DONE")
