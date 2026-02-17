@@ -277,8 +277,6 @@ def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
 
     # Training loop
     step_counter = 0
-    best_val_loss = float('inf')
-
     for epoch in tqdm(range(1, args.epochs + 1), desc=f"Seed {seed}", unit="epoch"):
         # Train
         train_loss, train_q, step_counter = train_epoch(
@@ -293,25 +291,29 @@ def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
         # Validate
         val_loss, val_q = validate(model, val_loader, device, gamma=args.gamma)
 
-        # Log every few epochs
-        if epoch % 5 == 0 or epoch == 1:
-            tqdm.write(
-                f"  Epoch {epoch}/{args.epochs} - "
-                f"Train Loss: {train_loss:.4f}, Q: {train_q:.2f} | "
-                f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f}"
-            )
-
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch = epoch
-            torch.save(model.state_dict(), save_dir / f'model_seed{seed}_best.pth')
+        # Log every epochs
+        tqdm.write(
+            f"  Epoch {epoch}/{args.epochs} - "
+            f"Train Loss: {train_loss:.4f}, Q: {train_q:.2f} | "
+            f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f}"
+        )
 
         # Save checkpoints
-        if epoch % args.save_interval == 0:
-            torch.save(model.state_dict(), save_dir / f'model_seed{seed}_epoch{epoch}.pth')
+        is_save_epoch = (epoch % args.save_interval == 0) or (epoch == args.epochs)
+        if is_save_epoch:
+            save_path = save_dir / f'model_seed{seed}_epoch{epoch}.pth'
+            tmp_path = save_path.with_suffix('.tmp')
+            # Sync device before saving to ensure all async ops are done
+            if device.type == 'mps':
+                torch.mps.synchronize()
+            elif device.type == 'cuda':
+                torch.cuda.synchronize()
+            # Move state_dict to CPU before saving (avoids MPS serialization issues)
+            cpu_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+            torch.save(cpu_state_dict, tmp_path)
+            tmp_path.replace(save_path)  # atomic rename: avoids corrupted files on crash
 
-    print(f"✓ Model seed {seed} training complete! Best Val Loss: {best_val_loss:.4f} at epoch {best_epoch}")
+    print(f"✓ Model seed {seed} training complete!")
 
 
 def main():
