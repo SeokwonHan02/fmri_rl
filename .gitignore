@@ -6,7 +6,12 @@ processed_data_frameskip_4/
 
 process_game2_data_fixed.py
 render_episodes/
+ensemble_dqn/
 analyze_action_distribution.py
+visualize_ensemble_variance.py
+ensemble_variance_viz/
+analyze_variance_score_correlation.py
+variance_score_analysis/
 
 *.err
 *.out

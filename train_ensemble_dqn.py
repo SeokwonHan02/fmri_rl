@@ -328,8 +328,8 @@ def main():
                         help='Index of file to use for validation')
 
     # Model
-    parser.add_argument('--ensemble_size', type=int, default=5, help='Number of ensemble models')
-    parser.add_argument('--seeds', type=int, nargs='+', default=[42, 43, 44, 45, 46],
+    parser.add_argument('--ensemble_size', type=int, default=10, help='Number of ensemble models')
+    parser.add_argument('--seeds', type=int, nargs='+', default=[42, 43, 44, 45, 46, 47, 48, 49, 50, 51],
                         help='Random seeds for ensemble models')
 
     # Training
@@ -391,7 +391,7 @@ def main():
         train_single_model(seed, train_loader, val_loader, device, args, save_dir)
 
     print(f"\n{'='*80}")
-    print("All 5 Ensemble Models Training Complete!")
+    print("All Ensemble Models Training Complete!")
     print(f"Models saved to: {save_dir}")
     print(f"{'='*80}")
 

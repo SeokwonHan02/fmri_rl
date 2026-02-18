@@ -365,7 +365,88 @@ def main():
     print(f"  I_habit vs I_prudence:     r = {corr_matrix[0, 2]:>7.4f}")
     print(f"  I_pessimism vs I_prudence: r = {corr_matrix[1, 2]:>7.4f}")
 
+    # =========================================================================
+    # OOD SUBSET ANALYSIS: Bottom 10% of each cognitive index
+    # =========================================================================
+
     print("\n" + "="*80)
+    print("OOD SUBSET ANALYSIS: Bottom 10% of Each Cognitive Index")
+    print("="*80)
+
+    subsets = [
+        ('I_habit (bottom 10%)',     I_habit,     0),
+        ('I_pessimism (bottom 10%)', I_pessimism, 1),
+        ('I_prudence (bottom 10%)',  I_prudence,  2),
+    ]
+
+    for subset_name, index_arr, _ in subsets:
+        threshold = np.percentile(index_arr, 10)
+        mask = index_arr <= threshold
+        n_subset = mask.sum()
+
+        print(f"--- {subset_name} ---")
+        print(f"  Threshold (10th pct): {threshold:.4f}")
+        print(f"  Subset size: {n_subset:,} / {len(index_arr):,} ({n_subset/len(index_arr)*100:.1f}%)")
+
+        # Index statistics in this subset
+        I_h_sub = I_habit[mask]
+        I_p_sub = I_pessimism[mask]
+        I_pr_sub = I_prudence[mask]
+
+        print(f"  I_habit     in subset: mean={np.mean(I_h_sub):.4f}, std={np.std(I_h_sub):.4f}")
+        print(f"  I_pessimism in subset: mean={np.mean(I_p_sub):.4f}, std={np.std(I_p_sub):.4f}")
+        print(f"  I_prudence  in subset: mean={np.mean(I_pr_sub):.4f}, std={np.std(I_pr_sub):.4f}")
+
+        # Cognitive index correlation matrix in this subset
+        sub_indices = np.vstack([I_h_sub, I_p_sub, I_pr_sub])
+        sub_corr = np.corrcoef(sub_indices)
+
+        print(f"\n  Cognitive Index Correlation Matrix (subset):")
+        print(f"  {'':>15s}", end='')
+        for name in index_names:
+            print(f"{name:>15s}", end='')
+        print()
+        print("  " + "-"*60)
+        for i, name in enumerate(index_names):
+            print(f"  {name:>15s}", end='')
+            for j in range(len(index_names)):
+                print(f"{sub_corr[i, j]:>15.4f}", end='')
+            print()
+
+        # Z-score correlation matrix in this subset
+        dqn_z_sub  = dqn_z[mask]
+        bc_z_sub   = bc_z[mask]
+        cql_z_sub  = cql_z[mask]
+        bcq_z_sub  = bcq_z[mask]
+
+        sub_z = np.vstack([dqn_z_sub, bc_z_sub, cql_z_sub, bcq_z_sub])
+        sub_z_corr = np.corrcoef(sub_z)
+
+        print(f"\n  Z-Score Correlation Matrix (subset):")
+        print(f"  {'':>12s}", end='')
+        for name in z_names:
+            print(f"{name:>12s}", end='')
+        print()
+        print("  " + "-"*52)
+        for i, name in enumerate(z_names):
+            print(f"  {name:>12s}", end='')
+            for j in range(len(z_names)):
+                print(f"{sub_z_corr[i, j]:>12.4f}", end='')
+            print()
+
+        # Pairwise index correlations (concise)
+        print(f"\n  Pairwise Index Correlations (subset vs full):")
+        pairs = [
+            ('I_habit vs I_pessimism',    0, 1),
+            ('I_habit vs I_prudence',     0, 2),
+            ('I_pessimism vs I_prudence', 1, 2),
+        ]
+        for pair_name, i, j in pairs:
+            print(f"    {pair_name:30s}: subset r={sub_corr[i,j]:>7.4f}  |  full r={corr_matrix[i,j]:>7.4f}  |  Δ={sub_corr[i,j]-corr_matrix[i,j]:>+7.4f}")
+
+        print()
+
+    print("="*80)
     print("DONE")
     print("="*80)
 

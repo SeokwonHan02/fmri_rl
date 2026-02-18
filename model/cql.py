@@ -135,13 +135,15 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
     return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
 
 
-def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1):
+def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None):
     """Validation function for CQL with detailed metrics"""
     model.eval()
     total_td_loss = 0
     total_cql_loss = 0
     total_loss_sum = 0
     total_q_value = 0
+    total_ce_loss = 0
+    total_wce_loss = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -184,16 +186,24 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1):
             # Total loss
             total_loss = td_loss + model.alpha * cql_loss
 
+            # 6-class CE: treat Q-values as logits
+            ce_loss  = F.cross_entropy(q_values, action_idx)
+            wce_loss = F.cross_entropy(q_values, action_idx, weight=action_weights)
+
             # Statistics
-            total_td_loss += td_loss.item() * state.size(0)
-            total_cql_loss += cql_loss.item() * state.size(0)
+            total_td_loss  += td_loss.item()    * state.size(0)
+            total_cql_loss += cql_loss.item()   * state.size(0)
             total_loss_sum += total_loss.item() * state.size(0)
-            total_q_value += q_values.mean().item() * state.size(0)
-            total_samples += state.size(0)
+            total_q_value  += q_values.mean().item() * state.size(0)
+            total_ce_loss  += ce_loss.item()    * state.size(0)
+            total_wce_loss += wce_loss.item()   * state.size(0)
+            total_samples  += state.size(0)
 
-    avg_td_loss = total_td_loss / total_samples
-    avg_cql_loss = total_cql_loss / total_samples
-    avg_total_loss = total_loss_sum / total_samples
-    avg_q_value = total_q_value / total_samples
+    avg_td_loss    = total_td_loss    / total_samples
+    avg_cql_loss   = total_cql_loss   / total_samples
+    avg_total_loss = total_loss_sum   / total_samples
+    avg_q_value    = total_q_value    / total_samples
+    avg_ce_loss    = total_ce_loss    / total_samples
+    avg_wce_loss   = total_wce_loss   / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss

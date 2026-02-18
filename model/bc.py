@@ -148,7 +148,8 @@ def train_bc(model, dataloader, optimizer, device, label_smoothing=0.0, fire_wei
     return avg_loss, action_accuracy, avg_fire_loss, avg_move_loss, fire_accuracy, move_accuracy
 
 
-def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, move_weights=None, fire_loss_weight=1.0, move_loss_weight=1.0):
+def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, move_weights=None,
+           fire_loss_weight=1.0, move_loss_weight=1.0, action_weights=None):
     """Validation function for Behavior Cloning"""
     model.eval()
     total_fire_loss = 0
@@ -157,6 +158,8 @@ def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, mo
     total_fire_correct = 0
     total_move_correct = 0
     total_action_correct = 0
+    total_ce_loss = 0
+    total_wce_loss = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -195,6 +198,10 @@ def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, mo
             move_loss = F.cross_entropy(move_logits, move_label, weight=move_weights, label_smoothing=label_smoothing)
             loss = fire_loss_weight * fire_loss + move_loss_weight * move_loss
 
+            # 6-class CE (unweighted and weighted) on action logits directly
+            ce_loss  = F.cross_entropy(action_logits, action)
+            wce_loss = F.cross_entropy(action_logits, action, weight=action_weights)
+
             # Statistics
             action_pred = action_logits.argmax(dim=-1)
             fire_pred = fire_logits.argmax(dim=-1)
@@ -206,6 +213,8 @@ def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, mo
             total_fire_correct += (fire_pred == fire_label).sum().item()
             total_move_correct += (move_pred == move_label).sum().item()
             total_action_correct += (action_pred == action).sum().item()
+            total_ce_loss  += ce_loss.item()  * state.size(0)
+            total_wce_loss += wce_loss.item() * state.size(0)
             total_samples += state.size(0)
 
     avg_fire_loss = total_fire_loss / total_samples
@@ -214,5 +223,7 @@ def val_bc(model, dataloader, device, label_smoothing=0.0, fire_weights=None, mo
     fire_accuracy = total_fire_correct / total_samples
     move_accuracy = total_move_correct / total_samples
     action_accuracy = total_action_correct / total_samples
+    avg_ce_loss  = total_ce_loss  / total_samples
+    avg_wce_loss = total_wce_loss / total_samples
 
-    return avg_loss, action_accuracy, avg_fire_loss, avg_move_loss, fire_accuracy, move_accuracy
+    return avg_loss, action_accuracy, avg_fire_loss, avg_move_loss, fire_accuracy, move_accuracy, avg_ce_loss, avg_wce_loss

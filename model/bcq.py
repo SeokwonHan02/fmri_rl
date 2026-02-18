@@ -190,11 +190,13 @@ def train_bcq(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
     return avg_q_loss, avg_q_value
 
 
-def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1):
+def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None):
     """Validation function for BCQ (BC network is frozen)"""
     model.eval()
     total_q_loss = 0
     total_q_value = 0
+    total_ce_loss = 0
+    total_wce_loss = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -217,8 +219,8 @@ def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1):
             else:
                 action_idx = action
 
-            # Forward pass (imitation_logits not used in validation)
-            q_values, _ = model(state)
+            # Forward pass
+            q_values, imitation_logits = model(state)
             q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
             # Compute target Q-value
@@ -245,12 +247,20 @@ def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1):
             # Q-learning loss
             q_loss = F.smooth_l1_loss(q_value, target_q)
 
+            # 6-class CE: use imitation_logits (the BC branch of BCQ)
+            ce_loss  = F.cross_entropy(imitation_logits, action_idx)
+            wce_loss = F.cross_entropy(imitation_logits, action_idx, weight=action_weights)
+
             # Statistics
-            total_q_loss += q_loss.item() * state.size(0)
-            total_q_value += q_values.mean().item() * state.size(0)
-            total_samples += state.size(0)
+            total_q_loss   += q_loss.item()   * state.size(0)
+            total_q_value  += q_values.mean().item() * state.size(0)
+            total_ce_loss  += ce_loss.item()  * state.size(0)
+            total_wce_loss += wce_loss.item() * state.size(0)
+            total_samples  += state.size(0)
 
-    avg_q_loss = total_q_loss / total_samples
-    avg_q_value = total_q_value / total_samples
+    avg_q_loss   = total_q_loss   / total_samples
+    avg_q_value  = total_q_value  / total_samples
+    avg_ce_loss  = total_ce_loss  / total_samples
+    avg_wce_loss = total_wce_loss / total_samples
 
-    return avg_q_loss, avg_q_value
+    return avg_q_loss, avg_q_value, avg_ce_loss, avg_wce_loss

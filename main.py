@@ -26,6 +26,33 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def compute_action_weights(dataloader, device='cpu', exponent=0.5):
+    """Compute 6-class inverse-frequency weights for cross-entropy loss."""
+    counts = torch.zeros(6, dtype=torch.long)
+    for batch in dataloader:
+        action = batch['action']
+        if action.dim() == 2:
+            action_idx = action.argmax(dim=-1)
+        else:
+            action_idx = action.long()
+        for a in action_idx:
+            counts[a] += 1
+
+    total = counts.sum().float()
+    if exponent == 0.0:
+        weights = torch.ones(6)
+    else:
+        weights = (total / (6 * counts.float().clamp_min(1.0))) ** exponent
+
+    action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
+    print("\n6-class Action Distribution:")
+    for i in range(6):
+        pct = (counts[i].float() / total * 100).item()
+        print(f"  {action_names[i]:>12s}: {counts[i]:6,} ({pct:5.2f}%) - Weight: {weights[i]:.4f}")
+
+    return weights.to(device)
+
+
 def compute_fire_move_weights(dataloader, device='cpu', exponent=0.5):
     from model.bc import action_to_fire_move
 
@@ -116,6 +143,12 @@ def main():
     # Create model based on algorithm
     print(f"\nCreating {args.algo.upper()} model...")
 
+    # Compute 6-class action weights (used by all algos for val CE)
+    if args.class_weight_exponent > 0:
+        action_weights = compute_action_weights(train_loader, device, args.class_weight_exponent)
+    else:
+        action_weights = None
+
     if args.algo == 'bc':
         model = BehaviorCloning(cnn, action_dim=6)
         train_fn = train_bc
@@ -164,9 +197,9 @@ def main():
                 model, train_loader, optimizer, device, args.label_smoothing, fire_weights, move_weights,
                 args.fire_loss_weight, args.move_loss_weight
             )
-            val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc = val_fn(
+            val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc, val_ce, val_wce = val_fn(
                 model, val_loader, device, args.label_smoothing, fire_weights, move_weights,
-                args.fire_loss_weight, args.move_loss_weight
+                args.fire_loss_weight, args.move_loss_weight, action_weights
             )
 
             tqdm.write(
@@ -176,7 +209,8 @@ def main():
                 f"          Move Loss: {train_move_loss:.4f}, Move Acc: {train_move_acc:.4f}\n"
                 f"  Val   - Loss: {val_loss:.4f}, Action Acc: {val_acc:.4f}\n"
                 f"          Fire Loss: {val_fire_loss:.4f}, Fire Acc: {val_fire_acc:.4f}\n"
-                f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}"
+                f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}\n"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
             )
 
             # Save model every save_interval epochs
@@ -189,14 +223,15 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_q_loss, val_avg_q = val_fn(
-                model, val_loader, device, args.gamma, args.reward_scale
+            val_q_loss, val_avg_q, val_ce, val_wce = val_fn(
+                model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}"
+                f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
             )
 
             # Save model every save_interval epochs
@@ -209,14 +244,15 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_td_loss, val_cql_loss, val_total_loss, val_avg_q = val_cql(
-                model, val_loader, device, args.gamma, args.reward_scale
+            val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce = val_cql(
+                model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}"
+                f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
             )
 
             # Save model every save_interval epochs
