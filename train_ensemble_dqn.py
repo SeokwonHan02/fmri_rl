@@ -206,6 +206,7 @@ def validate(model, dataloader, device, gamma=0.99):
     total_ce_loss = 0
     total_wce_numerator = 0
     total_wce_denominator = 0
+    total_correct = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -240,13 +241,19 @@ def validate(model, dataloader, device, gamma=0.99):
             # Huber loss
             loss = F.smooth_l1_loss(q_value, target_q)
 
-            # CE loss: treat Q-values as logits, target = human action
-            per_sample_ce = F.cross_entropy(q_values, action_idx, reduction='none')  # (B,)
+            # Z-score normalize Q-values across 6 actions, use as logits for CE
+            q_mean = q_values.mean(dim=-1, keepdim=True)
+            q_std = q_values.std(dim=-1, keepdim=True) + 1e-8
+            z_values = (q_values - q_mean) / q_std  # (B, 6)
 
-            # Weighted CE loss: weight each sample by clipped reward (reward > 0)
+            per_sample_ce = F.cross_entropy(z_values, action_idx, reduction='none')  # (B,)
+
+            # Weighted CE: weight each sample by clipped reward (reward > 0)
             weights = reward.clamp(min=0.0)  # (B,)
             wce_numerator = (per_sample_ce * weights).sum()
             wce_denominator = weights.sum()
+
+            action_pred = z_values.argmax(dim=-1)
 
             # Statistics
             total_loss += loss.item() * state.size(0)
@@ -254,14 +261,16 @@ def validate(model, dataloader, device, gamma=0.99):
             total_ce_loss += per_sample_ce.sum().item()
             total_wce_numerator += wce_numerator.item()
             total_wce_denominator += wce_denominator.item()
+            total_correct += (action_pred == action_idx).sum().item()
             total_samples += state.size(0)
 
     avg_loss = total_loss / total_samples
     avg_q_value = total_q_value / total_samples
     avg_ce_loss = total_ce_loss / total_samples
     avg_wce_loss = total_wce_numerator / total_wce_denominator if total_wce_denominator > 0 else float('nan')
+    action_accuracy = total_correct / total_samples
 
-    return avg_loss, avg_q_value, avg_ce_loss, avg_wce_loss
+    return avg_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy
 
 
 def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
@@ -305,14 +314,14 @@ def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
         )
 
         # Validate
-        val_loss, val_q, val_ce, val_wce = validate(model, val_loader, device, gamma=args.gamma)
+        val_loss, val_q, val_ce, val_wce, val_acc = validate(model, val_loader, device, gamma=args.gamma)
 
         # Log every epoch
         tqdm.write(
             f"  Epoch {epoch}/{args.epochs} - "
             f"Train Loss: {train_loss:.4f}, Q: {train_q:.2f} | "
             f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f} | "
-            f"Val CE: {val_ce:.4f}, Val WCE: {val_wce:.4f}"
+            f"Val CE: {val_ce:.4f}, Val WCE: {val_wce:.4f}, Val Acc: {val_acc:.4f}"
         )
 
         # Save checkpoints
