@@ -203,6 +203,9 @@ def validate(model, dataloader, device, gamma=0.99):
     model.eval()
     total_loss = 0
     total_q_value = 0
+    total_ce_loss = 0
+    total_wce_numerator = 0
+    total_wce_denominator = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -237,15 +240,28 @@ def validate(model, dataloader, device, gamma=0.99):
             # Huber loss
             loss = F.smooth_l1_loss(q_value, target_q)
 
+            # CE loss: treat Q-values as logits, target = human action
+            per_sample_ce = F.cross_entropy(q_values, action_idx, reduction='none')  # (B,)
+
+            # Weighted CE loss: weight each sample by clipped reward (reward > 0)
+            weights = reward.clamp(min=0.0)  # (B,)
+            wce_numerator = (per_sample_ce * weights).sum()
+            wce_denominator = weights.sum()
+
             # Statistics
             total_loss += loss.item() * state.size(0)
             total_q_value += q_values.mean().item() * state.size(0)
+            total_ce_loss += per_sample_ce.sum().item()
+            total_wce_numerator += wce_numerator.item()
+            total_wce_denominator += wce_denominator.item()
             total_samples += state.size(0)
 
     avg_loss = total_loss / total_samples
     avg_q_value = total_q_value / total_samples
+    avg_ce_loss = total_ce_loss / total_samples
+    avg_wce_loss = total_wce_numerator / total_wce_denominator if total_wce_denominator > 0 else float('nan')
 
-    return avg_loss, avg_q_value
+    return avg_loss, avg_q_value, avg_ce_loss, avg_wce_loss
 
 
 def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
@@ -289,13 +305,14 @@ def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
         )
 
         # Validate
-        val_loss, val_q = validate(model, val_loader, device, gamma=args.gamma)
+        val_loss, val_q, val_ce, val_wce = validate(model, val_loader, device, gamma=args.gamma)
 
-        # Log every epochs
+        # Log every epoch
         tqdm.write(
             f"  Epoch {epoch}/{args.epochs} - "
             f"Train Loss: {train_loss:.4f}, Q: {train_q:.2f} | "
-            f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f}"
+            f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f} | "
+            f"Val CE: {val_ce:.4f}, Val WCE: {val_wce:.4f}"
         )
 
         # Save checkpoints

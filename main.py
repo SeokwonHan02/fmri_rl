@@ -223,7 +223,7 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_q_loss, val_avg_q, val_ce, val_wce = val_fn(
+            val_q_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
                 model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
 
@@ -231,7 +231,7 @@ def main():
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
             )
 
             # Save model every save_interval epochs
@@ -244,7 +244,7 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce = val_cql(
+            val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_cql(
                 model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
 
@@ -252,7 +252,7 @@ def main():
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
             )
 
             # Save model every save_interval epochs

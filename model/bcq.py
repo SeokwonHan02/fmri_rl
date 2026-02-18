@@ -197,6 +197,7 @@ def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
     total_q_value = 0
     total_ce_loss = 0
     total_wce_loss = 0
+    total_correct = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -247,20 +248,32 @@ def val_bcq(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             # Q-learning loss
             q_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # 6-class CE: use imitation_logits (the BC branch of BCQ)
-            ce_loss  = F.cross_entropy(imitation_logits, action_idx)
-            wce_loss = F.cross_entropy(imitation_logits, action_idx, weight=action_weights)
+            # Z-score normalize Q-values using only unmasked actions; masked → -3.0
+            imitation_probs = F.softmax(imitation_logits, dim=-1)
+            bcq_mask = imitation_probs > (imitation_probs.max(dim=-1, keepdim=True)[0] * model.threshold)
+            mf = bcq_mask.float()
+            cnt = mf.sum(dim=-1, keepdim=True) + 1e-8
+            b_mean = (q_values * mf).sum(dim=-1, keepdim=True) / cnt
+            b_var = ((q_values - b_mean) * mf).pow(2).sum(dim=-1, keepdim=True) / cnt
+            b_std = b_var.sqrt() + 1e-8
+            z_values = (q_values - b_mean) / b_std  # (B, 6)
+            z_values = torch.where(bcq_mask, z_values, torch.full_like(z_values, -3.0))
+            ce_loss  = F.cross_entropy(z_values, action_idx)
+            wce_loss = F.cross_entropy(z_values, action_idx, weight=action_weights)
+            action_pred = z_values.argmax(dim=-1)
 
             # Statistics
             total_q_loss   += q_loss.item()   * state.size(0)
             total_q_value  += q_values.mean().item() * state.size(0)
             total_ce_loss  += ce_loss.item()  * state.size(0)
             total_wce_loss += wce_loss.item() * state.size(0)
+            total_correct  += (action_pred == action_idx).sum().item()
             total_samples  += state.size(0)
 
-    avg_q_loss   = total_q_loss   / total_samples
-    avg_q_value  = total_q_value  / total_samples
-    avg_ce_loss  = total_ce_loss  / total_samples
-    avg_wce_loss = total_wce_loss / total_samples
+    avg_q_loss      = total_q_loss   / total_samples
+    avg_q_value     = total_q_value  / total_samples
+    avg_ce_loss     = total_ce_loss  / total_samples
+    avg_wce_loss    = total_wce_loss / total_samples
+    action_accuracy = total_correct  / total_samples
 
-    return avg_q_loss, avg_q_value, avg_ce_loss, avg_wce_loss
+    return avg_q_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy

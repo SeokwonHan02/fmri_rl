@@ -144,6 +144,7 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
     total_q_value = 0
     total_ce_loss = 0
     total_wce_loss = 0
+    total_correct = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -186,9 +187,13 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             # Total loss
             total_loss = td_loss + model.alpha * cql_loss
 
-            # 6-class CE: treat Q-values as logits
-            ce_loss  = F.cross_entropy(q_values, action_idx)
-            wce_loss = F.cross_entropy(q_values, action_idx, weight=action_weights)
+            # Z-score normalize Q-values across 6 actions, use as logits for CE
+            q_mean = q_values.mean(dim=-1, keepdim=True)
+            q_std = q_values.std(dim=-1, keepdim=True) + 1e-8
+            z_values = (q_values - q_mean) / q_std  # (B, 6)
+            ce_loss  = F.cross_entropy(z_values, action_idx)
+            wce_loss = F.cross_entropy(z_values, action_idx, weight=action_weights)
+            action_pred = z_values.argmax(dim=-1)
 
             # Statistics
             total_td_loss  += td_loss.item()    * state.size(0)
@@ -197,6 +202,7 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             total_q_value  += q_values.mean().item() * state.size(0)
             total_ce_loss  += ce_loss.item()    * state.size(0)
             total_wce_loss += wce_loss.item()   * state.size(0)
+            total_correct  += (action_pred == action_idx).sum().item()
             total_samples  += state.size(0)
 
     avg_td_loss    = total_td_loss    / total_samples
@@ -205,5 +211,6 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
     avg_q_value    = total_q_value    / total_samples
     avg_ce_loss    = total_ce_loss    / total_samples
     avg_wce_loss   = total_wce_loss   / total_samples
+    action_accuracy = total_correct   / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy
