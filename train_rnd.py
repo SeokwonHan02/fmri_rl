@@ -134,14 +134,18 @@ class ObsNormalizer(nn.Module):
         batch_mean = x.mean(dim=0)
         batch_var  = x.var(dim=0, unbiased=False)
 
-        total = self.count + B
-        delta = batch_mean - self.mean
+        mean  = self.mean.cpu()
+        var   = self.var.cpu()
+        count = self.count.cpu()
 
-        new_mean = self.mean + delta * (B / total)
+        total = count + B
+        delta = batch_mean - mean
 
-        m_a = self.var  * self.count
+        new_mean = mean + delta * (B / total)
+
+        m_a = var   * count
         m_b = batch_var * B
-        m2  = m_a + m_b + delta.pow(2) * (self.count * B / total)
+        m2  = m_a + m_b + delta.pow(2) * (count * B / total)
 
         self.mean.copy_(new_mean)
         self.var.copy_(m2 / total)
