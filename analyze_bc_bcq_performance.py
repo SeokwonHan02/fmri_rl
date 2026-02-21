@@ -25,7 +25,7 @@ def get_args():
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
                         help='Path to pretrained DQN checkpoint')
     parser.add_argument('--bc-path', type=str,
-                        default='/Users/seokwon/research/fMRI_RL/pretrained/bc.pth',
+                        default='/Users/seokwon/research/fMRI_RL/pretrained/bc_653_15.pth',
                         help='Path to trained BC model')
 
     # Other
