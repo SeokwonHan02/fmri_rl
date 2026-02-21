@@ -124,14 +124,19 @@ def create_dataloader(data_dir, batch_size, subject, num_workers=4, shuffle=True
 
 def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, val_file_idx=10):
     """
-    Create train and validation dataloaders by splitting files
+    Create train and validation dataloaders with a serial split.
+
+    Serial split (respects temporal order of data):
+      - train : files with index  < val_file_idx  (indices 0 .. val_file_idx-1)
+      - val   : file  with index == val_file_idx
+      - ignored: files with index  > val_file_idx  (future data, never seen)
 
     Args:
         data_dir: Base directory containing processed data
         batch_size: Batch size for training
         subject: Subject ID (e.g., 'sub_1')
         num_workers: Number of data loading workers
-        val_file_idx: Index of file to use for validation (0-based)
+        val_file_idx: Index of file to use for validation (0-based); must be >= 1
     """
     # Find all npz files
     subject_dir = Path(data_dir) / subject
@@ -145,18 +150,20 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, v
         raise ValueError(f"No npz files found in {subject_dir}")
 
     # Validate val_file_idx
-    if val_file_idx < 0 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [0, {n_files-1}]")
+    if val_file_idx < 1 or val_file_idx >= n_files:
+        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]"
+                         f" (need at least 1 train file before val)")
 
-    print(f"\nSplitting data:")
-    print(f"  Total files: {n_files}")
-    print(f"  Validation file index: {val_file_idx}")
-    print(f"  Validation file: {Path(npz_files[val_file_idx]).name}")
-    print(f"  Train files: {n_files - 1}")
+    print(f"\nSplitting data (serial):")
+    print(f"  Total files    : {n_files}")
+    print(f"  Val file index : {val_file_idx}")
+    print(f"  Val file       : {Path(npz_files[val_file_idx]).name}")
+    print(f"  Train files    : {val_file_idx}  (indices 0..{val_file_idx-1})")
+    print(f"  Ignored files  : {n_files - val_file_idx - 1}  (indices > {val_file_idx})")
 
-    # Split files (use specified index for validation)
-    val_files = [npz_files[val_file_idx]]
-    train_files = npz_files[:val_file_idx] + npz_files[val_file_idx+1:]
+    # Serial split: train = all files strictly before val_file_idx
+    val_files   = [npz_files[val_file_idx]]
+    train_files = npz_files[:val_file_idx]
 
     # Create datasets using the npz_files parameter
     print(f"\nLoading training data...")

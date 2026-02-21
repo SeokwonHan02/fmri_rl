@@ -12,6 +12,8 @@ visualize_ensemble_variance.py
 ensemble_variance_viz/
 analyze_variance_score_correlation.py
 variance_score_analysis/
+visualize_rnd_extremes.py
+results/
 
 *.err
 *.out

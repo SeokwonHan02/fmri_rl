@@ -51,8 +51,8 @@ def set_seed(seed):
 
 def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, val_file_idx=10):
     """
-    Use 10 train files + 1 val file (leave-one-out style).
-    Mirrors create_train_val_dataloaders_10train in train_ensemble_dqn.py.
+    Serial split: train on files strictly before val_file_idx, validate on val_file_idx.
+    Files with index > val_file_idx are discarded (future data).
     """
     subject_dir = Path(data_dir) / subject
     if not subject_dir.exists():
@@ -61,20 +61,21 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4, v
     npz_files = sorted(glob.glob(str(subject_dir / '*.npz')))
     n_files = len(npz_files)
 
-    if n_files < 11:
-        raise ValueError(f"Need at least 11 files, found {n_files}")
-    if val_file_idx < 0 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [0, {n_files-1}]")
+    if n_files == 0:
+        raise ValueError(f"No npz files found in {subject_dir}")
+    if val_file_idx < 1 or val_file_idx >= n_files:
+        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]"
+                         f" (need at least 1 train file before val)")
 
-    print(f"\nSplitting data:")
+    val_files   = [npz_files[val_file_idx]]
+    train_files = npz_files[:val_file_idx]
+
+    print(f"\nSplitting data (serial):")
     print(f"  Total files    : {n_files}")
     print(f"  Val file index : {val_file_idx}")
     print(f"  Val file       : {Path(npz_files[val_file_idx]).name}")
-    print(f"  Train files    : 10 (excluding validation file)")
-
-    val_files = [npz_files[val_file_idx]]
-    all_train_files = npz_files[:val_file_idx] + npz_files[val_file_idx + 1:]
-    train_files = all_train_files[:10]
+    print(f"  Train files    : {len(train_files)}  (indices 0..{val_file_idx-1})")
+    print(f"  Ignored files  : {n_files - val_file_idx - 1}  (indices > {val_file_idx})")
 
     print(f"\nTrain files:")
     for i, f in enumerate(train_files):
