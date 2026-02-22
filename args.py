@@ -19,7 +19,9 @@ def get_args():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--val-file-idx', type=int, default=10,
-                        help='Index of file to use for validation (0-10 for 11 files, default: 10 = last file)')
+                        help='Index of validation file (0-based)')
+    parser.add_argument('--test-file-idx', type=int, default=11,
+                        help='Index of test file (0-based)')
 
     # Model
     parser.add_argument('--dqn-path', type=str,

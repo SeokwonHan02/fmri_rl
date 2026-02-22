@@ -21,7 +21,9 @@ def get_args():
                         choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'],
                         help='Which subject data to use')
     parser.add_argument('--val-file-idx', type=int, default=10,
-                        help='Index of file to use for validation (0-10 for 11 files)')
+                        help='Index of validation file (0-based)')
+    parser.add_argument('--test-file-idx', type=int, default=11,
+                        help='Index of test file (0-based); must be > val-file-idx')
 
     # Model paths
     parser.add_argument('--dqn-path', type=str,
@@ -202,14 +204,16 @@ def main():
 
     # Load data
     print("Loading data...")
-    train_loader, val_loader = create_train_val_dataloaders(
+    _, val_loader, test_loader = create_train_val_dataloaders(
         args.data_dir,
         batch_size=args.batch_size,
         subject=args.subject,
         num_workers=args.num_workers,
-        val_file_idx=args.val_file_idx
+        val_file_idx=args.val_file_idx,
+        test_file_idx=args.test_file_idx,
     )
-    print(f"✓ Validation batches: {len(val_loader)}\n")
+    print(f"✓ Validation batches: {len(val_loader)}")
+    print(f"✓ Test batches      : {len(test_loader)}\n")
 
     # Load models
     dqn, bc, cql, bcq = load_models(args, device)

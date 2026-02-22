@@ -35,23 +35,25 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def create_train_val_dataloaders_10train(data_dir, batch_size, subject, num_workers=4, val_file_idx=10):
+def create_train_val_dataloaders_10train(data_dir, batch_size, subject, num_workers=4,
+                                          val_file_idx=10, test_file_idx=11):
     """
-    Create train and validation dataloaders with a serial split.
+    Create train / val / test dataloaders with a serial split.
 
     Serial split (respects temporal order of data):
       - train : files with index  < val_file_idx  (indices 0 .. val_file_idx-1)
       - val   : file  with index == val_file_idx
-      - ignored: files with index  > val_file_idx  (future data, never seen)
+      - test  : file  with index == test_file_idx  (must be > val_file_idx)
+      - ignored: all other indices
 
     Args:
         data_dir: Base directory containing processed data
         batch_size: Batch size for training
         subject: Subject ID (e.g., 'sub_1')
         num_workers: Number of data loading workers
-        val_file_idx: Index of file to use for validation (0-based); must be >= 1
+        val_file_idx: Index of validation file (0-based); must be >= 1
+        test_file_idx: Index of test file (0-based); must be > val_file_idx
     """
-    # Find all npz files
     subject_dir = Path(data_dir) / subject
     if not subject_dir.exists():
         raise ValueError(f"Subject directory not found: {subject_dir}")
@@ -61,55 +63,42 @@ def create_train_val_dataloaders_10train(data_dir, batch_size, subject, num_work
 
     if n_files == 0:
         raise ValueError(f"No npz files found in {subject_dir}")
-
-    # Validate val_file_idx
     if val_file_idx < 1 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]"
-                         f" (need at least 1 train file before val)")
+        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]")
+    if test_file_idx <= val_file_idx or test_file_idx >= n_files:
+        raise ValueError(f"test_file_idx={test_file_idx} must be in ({val_file_idx}, {n_files-1}]")
 
-    # Serial split: train = all files strictly before val_file_idx
-    val_files   = [npz_files[val_file_idx]]
     train_files = npz_files[:val_file_idx]
+    val_files   = [npz_files[val_file_idx]]
+    test_files  = [npz_files[test_file_idx]]
 
     print(f"\nSplitting data (serial):")
     print(f"  Total files    : {n_files}")
-    print(f"  Val file index : {val_file_idx}")
-    print(f"  Val file       : {Path(npz_files[val_file_idx]).name}")
     print(f"  Train files    : {len(train_files)}  (indices 0..{val_file_idx-1})")
-    print(f"  Ignored files  : {n_files - val_file_idx - 1}  (indices > {val_file_idx})")
+    print(f"  Val  file      : {Path(npz_files[val_file_idx]).name}  (index {val_file_idx})")
+    print(f"  Test file      : {Path(npz_files[test_file_idx]).name}  (index {test_file_idx})")
 
     print(f"\nTrain files used:")
     for i, f in enumerate(train_files):
         print(f"  {i+1}. {Path(f).name}")
 
-    # Create datasets
     print(f"\nLoading training data...")
     train_dataset = OfflineRLDataset(npz_files=train_files)
-
     print(f"\nLoading validation data...")
-    val_dataset = OfflineRLDataset(npz_files=val_files)
+    val_dataset   = OfflineRLDataset(npz_files=val_files)
+    print(f"\nLoading test data...")
+    test_dataset  = OfflineRLDataset(npz_files=test_files)
 
-    # Disable pin_memory for MPS (Apple Silicon GPU)
     use_pin_memory = torch.cuda.is_available()
 
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=use_pin_memory
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=use_pin_memory)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, pin_memory=use_pin_memory)
+    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False,
+                              num_workers=num_workers, pin_memory=use_pin_memory)
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=use_pin_memory
-    )
-
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 def soft_update_target(policy_net, target_net, tau):
@@ -355,7 +344,9 @@ def main():
                         help='Data directory')
     parser.add_argument('--subject', type=str, default='sub_1', help='Subject ID')
     parser.add_argument('--val_file_idx', type=int, default=10,
-                        help='Index of file to use for validation')
+                        help='Index of validation file (0-based)')
+    parser.add_argument('--test_file_idx', type=int, default=11,
+                        help='Index of test file (0-based); must be > val_file_idx')
 
     # Model
     parser.add_argument('--ensemble_size', type=int, default=10, help='Number of ensemble models')
@@ -396,15 +387,17 @@ def main():
 
     # Load data
     print("\nLoading data...")
-    train_loader, val_loader = create_train_val_dataloaders_10train(
+    train_loader, val_loader, test_loader = create_train_val_dataloaders_10train(
         args.data_dir,
         args.batch_size,
         args.subject,
         args.num_workers,
-        args.val_file_idx
+        args.val_file_idx,
+        args.test_file_idx,
     )
     print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
+    print(f"Val batches            : {len(val_loader)}")
+    print(f"Test batches           : {len(test_loader)}")
 
     # Ensure we have correct number of seeds
     if len(args.seeds) != args.ensemble_size:

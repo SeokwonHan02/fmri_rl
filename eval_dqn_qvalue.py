@@ -53,7 +53,9 @@ def get_args():
     parser.add_argument('--num-workers', type=int, default=0,
                         help='Number of data loading workers (for agreement validation)')
     parser.add_argument('--val-file-idx', type=int, default=10,
-                        help='Index of file to use for validation (0-10 for 11 files, default: 10 = last file)')
+                        help='Index of validation file (0-based)')
+    parser.add_argument('--test-file-idx', type=int, default=11,
+                        help='Index of test file (0-based); must be > val-file-idx')
 
     return parser.parse_args()
 
@@ -206,7 +208,8 @@ def evaluate_dqn_qvalue(model, env_name, device, num_episodes=10, seed=0, termin
     return results
 
 
-def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, device, val_file_idx=10):
+def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, device,
+                            val_file_idx=10, test_file_idx=11):
     """
     Validate DQN agreement with human actions on offline dataset
 
@@ -233,12 +236,13 @@ def validate_agreement_dqn(model, data_dir, subject, batch_size, num_workers, de
     # Load validation data
     print("\n[1/2] Loading validation data...")
     try:
-        train_loader, val_loader = create_train_val_dataloaders(
+        _, val_loader, _ = create_train_val_dataloaders(
             data_dir=data_dir,
             batch_size=batch_size,
             subject=subject,
             num_workers=num_workers,
-            val_file_idx=val_file_idx
+            val_file_idx=val_file_idx,
+            test_file_idx=test_file_idx,
         )
         print(f"✓ Validation set ready ({len(val_loader.dataset)} samples)")
     except Exception as e:
@@ -373,7 +377,8 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 device=device,
-                val_file_idx=args.val_file_idx
+                val_file_idx=args.val_file_idx,
+                test_file_idx=args.test_file_idx,
             )
         except Exception as e:
             print(f"✗ Agreement validation failed: {e}")

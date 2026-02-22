@@ -126,15 +126,17 @@ def main():
     print(f"Models will be saved to: {save_dir}")
 
     print("\nLoading data...")
-    train_loader, val_loader = create_train_val_dataloaders(
+    train_loader, val_loader, test_loader = create_train_val_dataloaders(
         args.data_dir,
         batch_size=args.batch_size,
         subject=args.subject,
         num_workers=args.num_workers,
-        val_file_idx=args.val_file_idx
+        val_file_idx=args.val_file_idx,
+        test_file_idx=args.test_file_idx,
     )
     print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
+    print(f"Val batches            : {len(val_loader)}")
+    print(f"Test batches           : {len(test_loader)}")
 
     print("\nLoading pretrained DQN CNN (frozen)...")
     cnn = load_pretrained_cnn(args.dqn_path, freeze=True)
@@ -201,6 +203,10 @@ def main():
                 model, val_loader, device, args.label_smoothing, fire_weights, move_weights,
                 args.fire_loss_weight, args.move_loss_weight, action_weights
             )
+            test_loss, test_acc, test_fire_loss, test_move_loss, test_fire_acc, test_move_acc, test_ce, test_wce = val_fn(
+                model, test_loader, device, args.label_smoothing, fire_weights, move_weights,
+                args.fire_loss_weight, args.move_loss_weight, action_weights
+            )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
@@ -210,7 +216,11 @@ def main():
                 f"  Val   - Loss: {val_loss:.4f}, Action Acc: {val_acc:.4f}\n"
                 f"          Fire Loss: {val_fire_loss:.4f}, Fire Acc: {val_fire_acc:.4f}\n"
                 f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}\n"
+                f"  Test  - Loss: {test_loss:.4f}, Action Acc: {test_acc:.4f}\n"
+                f"          Fire Loss: {test_fire_loss:.4f}, Fire Acc: {test_fire_acc:.4f}\n"
+                f"          Move Loss: {test_move_loss:.4f}, Move Acc: {test_move_acc:.4f}\n"
+                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}"
             )
 
             # Save model every save_interval epochs
@@ -226,12 +236,17 @@ def main():
             val_q_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
                 model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
+            test_q_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                model, test_loader, device, args.gamma, args.reward_scale, action_weights
+            )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                f"  Test  - Q Loss: {test_q_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
             # Save model every save_interval epochs
@@ -247,12 +262,17 @@ def main():
             val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_cql(
                 model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
+            test_td_loss, test_cql_loss, test_total_loss, test_avg_q, test_ce, test_wce, test_acc = val_cql(
+                model, test_loader, device, args.gamma, args.reward_scale, action_weights
+            )
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
                 f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
                 f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                f"  Test  - TD Loss: {test_td_loss:.4f}, CQL Loss: {test_cql_loss:.4f}, Total: {test_total_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
             # Save model every save_interval epochs
