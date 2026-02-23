@@ -2,6 +2,7 @@ from .dqn import DQN_CNN, DQN, load_pretrained_cnn
 from .bc import BehaviorCloning, train_bc, val_bc
 from .bcq import BCQ, train_bcq, val_bcq
 from .cql import CQL, train_cql, val_cql
+from .prob_cql import ProbCQL, train_prob_cql, val_prob_cql
 
 __all__ = [
     'DQN_CNN',
@@ -16,4 +17,7 @@ __all__ = [
     'CQL',
     'train_cql',
     'val_cql',
+    'ProbCQL',
+    'train_prob_cql',
+    'val_prob_cql',
 ]

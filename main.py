@@ -13,6 +13,7 @@ from model import (
     BehaviorCloning, train_bc, val_bc,
     BCQ, train_bcq, val_bcq,
     CQL, train_cql, val_cql,
+    ProbCQL, train_prob_cql, val_prob_cql,
 )
 from eval import evaluate_agent
 
@@ -176,6 +177,13 @@ def main():
         train_fn = train_cql
         val_fn = val_cql
 
+    elif args.algo == 'prob_cql':
+        model = ProbCQL(cnn, action_dim=6, alpha=args.cql_alpha,
+                        beta_kl=args.prob_cql_beta_kl)
+        train_fn = train_prob_cql
+        val_fn = val_prob_cql
+        print(f"ProbCQL: α={args.cql_alpha}, β_kl={args.prob_cql_beta_kl}")
+
     else:
         raise ValueError(f"Unknown algorithm: {args.algo}")
 
@@ -259,10 +267,10 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_cql(
+            val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
                 model, val_loader, device, args.gamma, args.reward_scale, action_weights
             )
-            test_td_loss, test_cql_loss, test_total_loss, test_avg_q, test_ce, test_wce, test_acc = val_cql(
+            test_td_loss, test_cql_loss, test_total_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
                 model, test_loader, device, args.gamma, args.reward_scale, action_weights
             )
 
@@ -272,6 +280,43 @@ def main():
                 f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
                 f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
                 f"  Test  - TD Loss: {test_td_loss:.4f}, CQL Loss: {test_cql_loss:.4f}, Total: {test_total_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+            )
+
+            # Save model every save_interval epochs
+            if epoch % args.save_interval == 0:
+                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
+
+        elif args.algo == 'prob_cql':
+            (train_td, train_cql_loss, train_kl, train_total,
+             train_avg_q, train_avg_var) = train_fn(
+                model, train_loader, optimizer, device,
+                args.gamma, args.target_update_freq, args.reward_scale
+            )
+
+            (val_td, val_cql_loss, val_kl, val_total,
+             val_avg_q, val_avg_var,
+             val_ce, val_wce, val_acc) = val_fn(
+                model, val_loader, device,
+                args.gamma, args.reward_scale, action_weights
+            )
+            (test_td, test_cql_loss, test_kl, test_total,
+             test_avg_q, test_avg_var,
+             test_ce, test_wce, test_acc) = val_fn(
+                model, test_loader, device,
+                args.gamma, args.reward_scale, action_weights
+            )
+
+            tqdm.write(
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - TD: {train_td:.4f}, CQL: {train_cql_loss:.4f}, KL: {train_kl:.4f}, "
+                f"Total: {train_total:.4f}, Q: {train_avg_q:.2f}, Var: {train_avg_var:.4f}\n"
+                f"  Val   - TD: {val_td:.4f}, CQL: {val_cql_loss:.4f}, KL: {val_kl:.4f}, "
+                f"Total: {val_total:.4f}, Q: {val_avg_q:.2f}, Var: {val_avg_var:.4f}\n"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                f"  Test  - TD: {test_td:.4f}, CQL: {test_cql_loss:.4f}, KL: {test_kl:.4f}, "
+                f"Total: {test_total:.4f}, Q: {test_avg_q:.2f}, Var: {test_avg_var:.4f}\n"
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 

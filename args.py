@@ -4,8 +4,8 @@ def get_args():
     parser = argparse.ArgumentParser(description='Offline RL for Space Invaders')
 
     # Algorithm selection
-    parser.add_argument('--algo', type=str, default='bc', choices=['bc', 'bcq', 'cql'],
-                        help='Algorithm to use: bc (Behavior Cloning), bcq (BCQ), or cql (CQL)')
+    parser.add_argument('--algo', type=str, default='bc', choices=['bc', 'bcq', 'cql', 'prob_cql'],
+                        help='Algorithm to use: bc, bcq, cql, or prob_cql')
 
     # Data
     parser.add_argument('--data-dir', type=str,
@@ -38,9 +38,13 @@ def get_args():
     parser.add_argument('--reward-scale', type=float, default=0.1,
                         help='Reward scaling factor')
 
-    # CQL specific
+    # CQL / ProbCQL shared
     parser.add_argument('--cql-alpha', type=float, default=0.2,
-                        help='CQL regularization weight')
+                        help='CQL regularization weight (shared by cql and prob_cql)')
+
+    # ProbCQL specific
+    parser.add_argument('--prob-cql-beta-kl', type=float, default=1e-3,
+                        help='KL divergence (Information Bottleneck) weight for prob_cql')
     parser.add_argument('--target-update-freq', type=int, default=100,
                         help='Target network update frequency')
 
