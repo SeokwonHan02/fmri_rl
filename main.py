@@ -12,7 +12,7 @@ from model import (
     load_pretrained_cnn,
     BehaviorCloning, train_bc, val_bc,
     BCQ, train_bcq, val_bcq,
-    CQL, train_cql, val_cql
+    CQL, train_cql, val_cql,
 )
 from eval import evaluate_agent
 

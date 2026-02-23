@@ -150,18 +150,22 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
 
     if n_files == 0:
         raise ValueError(f"No npz files found in {subject_dir}")
-    if val_file_idx < 1 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]")
-    if test_file_idx <= val_file_idx or test_file_idx >= n_files:
-        raise ValueError(f"test_file_idx={test_file_idx} must be in ({val_file_idx}, {n_files-1}]")
+    if val_file_idx < 0 or val_file_idx >= n_files:
+        raise ValueError(f"val_file_idx={val_file_idx} out of range [0, {n_files-1}]")
+    if test_file_idx < 0 or test_file_idx >= n_files:
+        raise ValueError(f"test_file_idx={test_file_idx} out of range [0, {n_files-1}]")
+    if val_file_idx == test_file_idx:
+        raise ValueError(f"val_file_idx and test_file_idx must be different")
 
-    train_files = npz_files[:val_file_idx]
+    exclude = {val_file_idx, test_file_idx}
+    train_files = [f for i, f in enumerate(npz_files) if i not in exclude]
     val_files   = [npz_files[val_file_idx]]
     test_files  = [npz_files[test_file_idx]]
 
-    print(f"\nSplitting data (serial):")
+    train_indices = [i for i in range(n_files) if i not in exclude]
+    print(f"\nSplitting data:")
     print(f"  Total files    : {n_files}")
-    print(f"  Train files    : {len(train_files)}  (indices 0..{val_file_idx-1})")
+    print(f"  Train files    : {len(train_files)}  (indices {train_indices})")
     print(f"  Val  file      : {Path(npz_files[val_file_idx]).name}  (index {val_file_idx})")
     print(f"  Test file      : {Path(npz_files[test_file_idx]).name}  (index {test_file_idx})")
 
