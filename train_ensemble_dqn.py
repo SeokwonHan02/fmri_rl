@@ -1,13 +1,14 @@
 """
-Train 5 Ensemble DQN models with Offline RL data
-- Uses Offline RL data (FQI - Fitted Q-Iteration)
-- Vanilla DQN (no conservative penalty, equivalent to CQL with alpha=0)
-- Trains CNN from scratch (not frozen)
-- Different random seeds for each model to create diversity
+Train Bootstrapped Ensemble DQN models with Offline RL data.
+
+Bootstrapped DQN:
+  - Split train files into `ensemble_size` partitions.
+  - Model i trains on all partitions except partition i (leave-one-out).
+  - No two models share the same training subset.
+  - Uncertainty is measured as variance across Q-value predictions.
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
@@ -22,37 +23,44 @@ from torch.utils.data import DataLoader
 from model.dqn import DQN
 
 
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
+
 def set_seed(seed):
-    """Set all random seeds for reproducibility"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-    # For deterministic behavior (may impact performance)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
-def create_train_val_dataloaders_10train(data_dir, batch_size, subject, num_workers=4,
-                                          val_file_idx=10, test_file_idx=11):
-    """
-    Create train / val / test dataloaders with a serial split.
+# ---------------------------------------------------------------------------
+# Data split helpers
+# ---------------------------------------------------------------------------
 
-    Serial split (respects temporal order of data):
-      - train : files with index  < val_file_idx  (indices 0 .. val_file_idx-1)
-      - val   : file  with index == val_file_idx
-      - test  : file  with index == test_file_idx  (must be > val_file_idx)
-      - ignored: all other indices
+def partition_files(files, n_partitions):
+    """Round-robin assignment of files to n_partitions partitions."""
+    partitions = [[] for _ in range(n_partitions)]
+    for i, f in enumerate(files):
+        partitions[i % n_partitions].append(f)
+    return partitions
+
+
+def prepare_data_split(data_dir, subject, train_indices, test_file_idx, ensemble_size):
+    """
+    Split data into bootstrap partitions for the ensemble.
 
     Args:
-        data_dir: Base directory containing processed data
-        batch_size: Batch size for training
-        subject: Subject ID (e.g., 'sub_1')
-        num_workers: Number of data loading workers
-        val_file_idx: Index of validation file (0-based); must be >= 1
-        test_file_idx: Index of test file (0-based); must be > val_file_idx
+        train_indices : list[int] – file indices to use for training
+        test_file_idx : int – file index to use for test
+
+    Returns:
+        partitions  : list[list[str]] – ensemble_size partitions of train files
+        test_files  : list[str]
     """
     subject_dir = Path(data_dir) / subject
     if not subject_dir.exists():
@@ -63,360 +71,324 @@ def create_train_val_dataloaders_10train(data_dir, batch_size, subject, num_work
 
     if n_files == 0:
         raise ValueError(f"No npz files found in {subject_dir}")
-    if val_file_idx < 1 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [1, {n_files-1}]")
-    if test_file_idx <= val_file_idx or test_file_idx >= n_files:
-        raise ValueError(f"test_file_idx={test_file_idx} must be in ({val_file_idx}, {n_files-1}]")
 
-    train_files = npz_files[:val_file_idx]
-    val_files   = [npz_files[val_file_idx]]
+    for idx in train_indices:
+        if idx < 0 or idx >= n_files:
+            raise ValueError(f"train_idx {idx} out of range [0, {n_files-1}]")
+    if test_file_idx < 0 or test_file_idx >= n_files:
+        raise ValueError(f"test_file_idx={test_file_idx} out of range [0, {n_files-1}]")
+    if test_file_idx in train_indices:
+        raise ValueError(f"test_file_idx={test_file_idx} must not overlap with train_idx")
+
+    train_files = [npz_files[i] for i in sorted(train_indices)]
     test_files  = [npz_files[test_file_idx]]
 
-    print(f"\nSplitting data (serial):")
-    print(f"  Total files    : {n_files}")
-    print(f"  Train files    : {len(train_files)}  (indices 0..{val_file_idx-1})")
-    print(f"  Val  file      : {Path(npz_files[val_file_idx]).name}  (index {val_file_idx})")
-    print(f"  Test file      : {Path(npz_files[test_file_idx]).name}  (index {test_file_idx})")
+    n_train = len(train_files)
+    if n_train < ensemble_size:
+        print(
+            f"[Warning] Only {n_train} train files but ensemble_size={ensemble_size}. "
+            f"Some models may share identical training data."
+        )
 
-    print(f"\nTrain files used:")
-    for i, f in enumerate(train_files):
-        print(f"  {i+1}. {Path(f).name}")
+    partitions = partition_files(train_files, ensemble_size)
 
-    print(f"\nLoading training data...")
-    train_dataset = OfflineRLDataset(npz_files=train_files)
-    print(f"\nLoading validation data...")
-    val_dataset   = OfflineRLDataset(npz_files=val_files)
-    print(f"\nLoading test data...")
-    test_dataset  = OfflineRLDataset(npz_files=test_files)
+    print(f"\nBootstrap data split:")
+    print(f"  Total files      : {n_files}")
+    print(f"  Train indices    : {sorted(train_indices)}  ({n_train} files)")
+    print(f"  Test  file       : {Path(test_files[0]).name}  (index {test_file_idx})")
+    print(f"  Ensemble size    : {ensemble_size}")
+    print(f"  Partitions (each model excludes one):")
+    for i, p in enumerate(partitions):
+        names = [Path(f).name for f in p]
+        print(f"    partition {i:2d}: {names}")
 
+    return partitions, test_files
+
+
+def make_loader(files, batch_size, num_workers, shuffle, verbose_label=None):
+    if verbose_label:
+        print(f"\nLoading {verbose_label} ({len(files)} files)...")
+    dataset = OfflineRLDataset(npz_files=files)
     use_pin_memory = torch.cuda.is_available()
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=use_pin_memory,
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
-    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
 
-    return train_loader, val_loader, test_loader
-
+# ---------------------------------------------------------------------------
+# Train / Evaluate
+# ---------------------------------------------------------------------------
 
 def soft_update_target(policy_net, target_net, tau):
-    """Soft update of target network parameters: θ_target = τ*θ_policy + (1-τ)*θ_target"""
-    for target_param, policy_param in zip(target_net.parameters(), policy_net.parameters()):
-        target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
+    for tp, pp in zip(target_net.parameters(), policy_net.parameters()):
+        tp.data.copy_(tau * pp.data + (1.0 - tau) * tp.data)
 
 
-def train_epoch(model, target_model, dataloader, optimizer, device, gamma=0.99,
-                use_soft_update=True, tau=0.005, update_freq=1000, step_counter=0):
-    """
-    Train one epoch with vanilla DQN (offline, no penalty)
-
-    Args:
-        model: Policy network
-        target_model: Target network
-        dataloader: Training data loader
-        optimizer: Optimizer
-        device: Device
-        gamma: Discount factor
-        use_soft_update: If True, use soft update (tau), else hard update (freq)
-        tau: Soft update parameter (only used if use_soft_update=True)
-        update_freq: Hard update frequency (only used if use_soft_update=False)
-        step_counter: Current training step (for hard update)
-
-    Returns:
-        avg_loss, avg_q_value, new_step_counter
-    """
+def train_epoch(model, target_model, dataloader, optimizer, device,
+                gamma=0.99, use_soft_update=True, tau=0.005,
+                update_freq=1000, step_counter=0):
     model.train()
-    total_loss = 0
-    total_q_value = 0
-    total_samples = 0
+    total_loss = total_q = total_samples = 0
 
     for batch in dataloader:
         step_counter += 1
 
-        state = batch['state'].to(device).float() / 255.0
-        action = batch['action'].to(device)
-        reward = batch['reward'].to(device).float()
+        state      = batch['state'].to(device).float() / 255.0
+        action     = batch['action'].to(device)
+        reward     = batch['reward'].to(device).float()
         next_state = batch['next_state'].to(device).float() / 255.0
-        done = batch['done'].to(device).float()
+        done       = batch['done'].to(device).float()
 
-        # Ensure all tensors are 1D
-        if reward.dim() == 2:
-            reward = reward.squeeze(1)
-        if done.dim() == 2:
-            done = done.squeeze(1)
+        if reward.dim() == 2: reward = reward.squeeze(1)
+        if done.dim()   == 2: done   = done.squeeze(1)
 
-        # Convert one-hot action to class index
-        if action.dim() == 2:
-            action_idx = action.argmax(dim=-1)
-        else:
-            action_idx = action
+        action_idx = action.argmax(dim=-1) if action.dim() == 2 else action
 
-        # Forward pass
         q_values = model(state)
-        q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
+        q_value  = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
 
-        # Compute target Q-value
         with torch.no_grad():
-            next_q_values = target_model(next_state)
-            next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
-            target_q = reward + gamma * next_q_value * (1 - done)
+            next_q_value = target_model(next_state).max(dim=1)[0]
+            target_q     = reward + gamma * next_q_value * (1 - done)
 
-        # Huber loss (smooth L1 loss) for stability
         loss = F.smooth_l1_loss(q_value, target_q)
 
-        # Backward pass
         optimizer.zero_grad()
         loss.backward()
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
-        # Update target network
         if use_soft_update:
             soft_update_target(model, target_model, tau)
-        else:
-            if step_counter % update_freq == 0:
-                target_model.load_state_dict(model.state_dict())
+        elif step_counter % update_freq == 0:
+            target_model.load_state_dict(model.state_dict())
 
-        # Statistics
-        total_loss += loss.item() * state.size(0)
-        total_q_value += q_values.mean().item() * state.size(0)
-        total_samples += state.size(0)
+        bs = state.size(0)
+        total_loss    += loss.item() * bs
+        total_q       += q_values.mean().item() * bs
+        total_samples += bs
 
-    avg_loss = total_loss / total_samples
-    avg_q_value = total_q_value / total_samples
-
-    return avg_loss, avg_q_value, step_counter
+    return total_loss / total_samples, total_q / total_samples, step_counter
 
 
-def validate(model, dataloader, device, gamma=0.99):
-    """Validation function"""
+def evaluate(model, dataloader, device):
+    """
+    Returns test metrics:
+      avg_ce, action_accuracy
+    """
     model.eval()
-    total_loss = 0
-    total_q_value = 0
-    total_ce_loss = 0
-    total_wce_numerator = 0
-    total_wce_denominator = 0
-    total_correct = 0
-    total_samples = 0
+    total_ce = total_correct = total_samples = 0
 
     with torch.no_grad():
         for batch in dataloader:
-            state = batch['state'].to(device).float() / 255.0
+            state  = batch['state'].to(device).float() / 255.0
             action = batch['action'].to(device)
-            reward = batch['reward'].to(device).float()
-            next_state = batch['next_state'].to(device).float() / 255.0
-            done = batch['done'].to(device).float()
 
-            # Ensure all tensors are 1D
-            if reward.dim() == 2:
-                reward = reward.squeeze(1)
-            if done.dim() == 2:
-                done = done.squeeze(1)
+            action_idx = action.argmax(dim=-1) if action.dim() == 2 else action
 
-            # Convert one-hot action to class index
-            if action.dim() == 2:
-                action_idx = action.argmax(dim=-1)
-            else:
-                action_idx = action
-
-            # Forward pass
             q_values = model(state)
-            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
 
-            # Compute target Q-value (use policy net as target for validation)
-            next_q_values = model(next_state)
-            next_q_value = next_q_values.max(dim=1)[0]
-            target_q = reward + gamma * next_q_value * (1 - done)
-
-            # Huber loss
-            loss = F.smooth_l1_loss(q_value, target_q)
-
-            # Z-score normalize Q-values across 6 actions, use as logits for CE
+            # Z-score normalize Q-values → use as logits for CE
             q_mean = q_values.mean(dim=-1, keepdim=True)
-            q_std = q_values.std(dim=-1, keepdim=True) + 1e-8
-            z_values = (q_values - q_mean) / q_std  # (B, 6)
+            q_std  = q_values.std(dim=-1, keepdim=True) + 1e-8
+            z_vals = (q_values - q_mean) / q_std
 
-            per_sample_ce = F.cross_entropy(z_values, action_idx, reduction='none')  # (B,)
+            per_sample_ce = F.cross_entropy(z_vals, action_idx, reduction='none')
 
-            # Weighted CE: weight each sample by clipped reward (reward > 0)
-            weights = reward.clamp(min=0.0)  # (B,)
-            wce_numerator = (per_sample_ce * weights).sum()
-            wce_denominator = weights.sum()
+            bs = state.size(0)
+            total_ce      += per_sample_ce.sum().item()
+            total_correct += (z_vals.argmax(dim=-1) == action_idx).sum().item()
+            total_samples += bs
 
-            action_pred = z_values.argmax(dim=-1)
-
-            # Statistics
-            total_loss += loss.item() * state.size(0)
-            total_q_value += q_values.mean().item() * state.size(0)
-            total_ce_loss += per_sample_ce.sum().item()
-            total_wce_numerator += wce_numerator.item()
-            total_wce_denominator += wce_denominator.item()
-            total_correct += (action_pred == action_idx).sum().item()
-            total_samples += state.size(0)
-
-    avg_loss = total_loss / total_samples
-    avg_q_value = total_q_value / total_samples
-    avg_ce_loss = total_ce_loss / total_samples
-    avg_wce_loss = total_wce_numerator / total_wce_denominator if total_wce_denominator > 0 else float('nan')
-    action_accuracy = total_correct / total_samples
-
-    return avg_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy
+    return total_ce / total_samples, total_correct / total_samples
 
 
-def train_single_model(seed, train_loader, val_loader, device, args, save_dir):
-    """Train a single DQN model with given seed"""
+# ---------------------------------------------------------------------------
+# Single model training
+# ---------------------------------------------------------------------------
+
+def train_single_model(model_idx, excluded_partition, train_files, test_loader,
+                       device, args, save_dir):
+    """
+    Train one ensemble member.
+
+    Args:
+        model_idx          : int, index of this ensemble member (0-based)
+        excluded_partition : list[str], files NOT used for this model (for logging)
+        train_files        : list[str], files used for training this model
+        test_loader        : DataLoader for test
+        device             : torch.device
+        args               : parsed arguments
+        save_dir           : Path to save checkpoints
+    """
+    seed = args.base_seed + model_idx
+
     print(f"\n{'='*80}")
-    print(f"Training Model with Seed {seed}")
+    print(f"Model {model_idx:2d} / {args.ensemble_size - 1}  |  seed={seed}")
+    print(f"  Training on  : {len(train_files)} files")
+    print(f"  Excluded     : {[Path(f).name for f in excluded_partition]}")
     print(f"{'='*80}")
 
-    # Set seed for this model
     set_seed(seed)
 
-    # Create model
-    model = DQN(action_dim=6).to(device)
+    train_loader = make_loader(
+        train_files, args.batch_size, args.num_workers, shuffle=True,
+        verbose_label=f"model {model_idx} train data"
+    )
+
+    model        = DQN(action_dim=6).to(device)
     target_model = DQN(action_dim=6).to(device)
     target_model.load_state_dict(model.state_dict())
+    for p in target_model.parameters():
+        p.requires_grad = False
 
-    # Freeze target model
-    for param in target_model.parameters():
-        param.requires_grad = False
-
-    # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    print(f"Model initialized with seed {seed}")
-    print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    print(f"  Optimizer: Adam, LR={args.lr:.2e}")
-    print(f"  Target update: {'Soft (tau=' + str(args.tau) + ')' if args.use_soft_update else 'Hard (freq=' + str(args.target_update_freq) + ')'}")
+    print(f"  Params: {sum(p.numel() for p in model.parameters()):,}  |  "
+          f"LR={args.lr:.2e}  |  "
+          f"Target: {'soft τ=' + str(args.tau) if args.use_soft_update else 'hard freq=' + str(args.target_update_freq)}")
 
-    # Training loop
     step_counter = 0
-    for epoch in tqdm(range(1, args.epochs + 1), desc=f"Seed {seed}", unit="epoch"):
-        # Train
+    summary_rows = []
+
+    for epoch in tqdm(range(1, args.epochs + 1), desc=f"Model {model_idx}", unit="epoch"):
         train_loss, train_q, step_counter = train_epoch(
             model, target_model, train_loader, optimizer, device,
             gamma=args.gamma,
             use_soft_update=args.use_soft_update,
             tau=args.tau,
             update_freq=args.target_update_freq,
-            step_counter=step_counter
+            step_counter=step_counter,
         )
 
-        # Validate
-        val_loss, val_q, val_ce, val_wce, val_acc = validate(model, val_loader, device, gamma=args.gamma)
+        test_ce, test_acc = evaluate(model, test_loader, device)
 
-        # Log every epoch
+        summary_rows.append({'epoch': epoch, 'test_ce': test_ce, 'test_acc': test_acc})
+
         tqdm.write(
-            f"  Epoch {epoch}/{args.epochs} - "
-            f"Train Loss: {train_loss:.4f}, Q: {train_q:.2f} | "
-            f"Val Loss: {val_loss:.4f}, Q: {val_q:.2f} | "
-            f"Val CE: {val_ce:.4f}, Val WCE: {val_wce:.4f}, Val Acc: {val_acc:.4f}"
+            f"  [Model {model_idx:2d}] Epoch {epoch:3d}/{args.epochs} | "
+            f"Train Loss={train_loss:.4f} Q={train_q:.2f} | "
+            f"Test CE={test_ce:.4f} Acc={test_acc:.4f}"
         )
 
-        # Save checkpoints
-        is_save_epoch = (epoch % args.save_interval == 0) or (epoch == args.epochs)
-        if is_save_epoch:
-            save_path = save_dir / f'model_seed{seed}_epoch{epoch}.pth'
-            tmp_path = save_path.with_suffix('.tmp')
-            # Sync device before saving to ensure all async ops are done
+        if epoch % args.save_interval == 0 or epoch == args.epochs:
+            save_path = save_dir / f'model_{model_idx:02d}_epoch{epoch}.pth'
+            tmp_path  = save_path.with_suffix('.tmp')
             if device.type == 'mps':
                 torch.mps.synchronize()
             elif device.type == 'cuda':
                 torch.cuda.synchronize()
-            # Move state_dict to CPU before saving (avoids MPS serialization issues)
-            cpu_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
-            torch.save(cpu_state_dict, tmp_path)
-            tmp_path.replace(save_path)  # atomic rename: avoids corrupted files on crash
+            cpu_sd = {k: v.cpu() for k, v in model.state_dict().items()}
+            torch.save(cpu_sd, tmp_path)
+            tmp_path.replace(save_path)
 
-    print(f"✓ Model seed {seed} training complete!")
+    last = summary_rows[-1]
+    print(f"\n  Model {model_idx:2d} done | "
+          f"Final Test CE={last['test_ce']:.4f} Acc={last['test_acc']:.4f}")
 
+    return summary_rows
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Ensemble DQN for Epistemic Uncertainty')
+    parser = argparse.ArgumentParser(description='Train Bootstrapped Ensemble DQN')
 
     # Data
     parser.add_argument('--data_dir', type=str,
-                        default='/Users/seokwon/research/fMRI_RL/processed_data_frameskip_4',
-                        help='Data directory')
-    parser.add_argument('--subject', type=str, default='sub_1', help='Subject ID')
-    parser.add_argument('--val_file_idx', type=int, default=10,
-                        help='Index of validation file (0-based)')
-    parser.add_argument('--test_file_idx', type=int, default=11,
-                        help='Index of test file (0-based); must be > val_file_idx')
+                        default='/Users/seokwon/research/fMRI_RL/processed_data_frameskip_4')
+    parser.add_argument('--subject', type=str, default='sub_1')
+    parser.add_argument('--train_idx', type=int, nargs='+', default=[0, 1, 2, 3, 4, 7, 8, 9, 10, 11],
+                        help='File indices to use for training (space-separated, e.g. --train_idx 0 1 2 3 4)')
+    parser.add_argument('--test_file_idx', type=int, default=6,
+                        help='Index of test file (0-based)')
 
-    # Model
-    parser.add_argument('--ensemble_size', type=int, default=10, help='Number of ensemble models')
-    parser.add_argument('--seeds', type=int, nargs='+', default=[42, 43, 44, 45, 46, 47, 48, 49, 50, 51],
-                        help='Random seeds for ensemble models')
+    # Ensemble
+    parser.add_argument('--ensemble_size', type=int, default=20,
+                        help='Number of ensemble members (= number of bootstrap partitions)')
+    parser.add_argument('--base_seed', type=int, default=42,
+                        help='Base random seed; model i uses base_seed + i')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=25, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--epochs',     type=int,   default=25)
+    parser.add_argument('--batch_size', type=int,   default=32)
+    parser.add_argument('--lr',         type=float, default=1e-4)
+    parser.add_argument('--gamma',      type=float, default=0.99)
 
-    # Target network update (Hard update)
-    parser.add_argument('--use_soft_update', action='store_true', default=False,
-                        help='Use soft update instead of hard update')
-    parser.add_argument('--tau', type=float, default=0.005,
-                        help='Soft update parameter (only used if use_soft_update=True)')
-    parser.add_argument('--target_update_freq', type=int, default=1000,
-                        help='Hard update frequency (only used if use_soft_update=False)')
+    # Target network
+    parser.add_argument('--use_soft_update',    action='store_true', default=False)
+    parser.add_argument('--tau',                type=float, default=0.005)
+    parser.add_argument('--target_update_freq', type=int,   default=1000)
 
     # System
-    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu/mps)')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
-    parser.add_argument('--save_interval', type=int, default=10, help='Save model every N epochs')
-    parser.add_argument('--save_dir', type=str, default='./models/ensemble_dqn',
-                        help='Directory to save models')
+    parser.add_argument('--device',        type=str, default='cuda')
+    parser.add_argument('--num_workers',   type=int, default=4)
+    parser.add_argument('--save_interval', type=int, default=10,
+                        help='Save checkpoint every N epochs (last epoch always saved)')
+    parser.add_argument('--save_dir', type=str, default='./models/ensemble_dqn')
 
     args = parser.parse_args()
 
-    # Device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Create save directory
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Models will be saved to: {save_dir}")
+    print(f"Checkpoints → {save_dir}")
 
-    # Load data
-    print("\nLoading data...")
-    train_loader, val_loader, test_loader = create_train_val_dataloaders_10train(
-        args.data_dir,
-        args.batch_size,
-        args.subject,
-        args.num_workers,
-        args.val_file_idx,
-        args.test_file_idx,
+    partitions, test_files = prepare_data_split(
+        args.data_dir, args.subject,
+        args.train_idx, args.test_file_idx,
+        args.ensemble_size,
     )
-    print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Val batches            : {len(val_loader)}")
-    print(f"Test batches           : {len(test_loader)}")
 
-    # Ensure we have correct number of seeds
-    if len(args.seeds) != args.ensemble_size:
-        print(f"Warning: Number of seeds ({len(args.seeds)}) != ensemble_size ({args.ensemble_size})")
-        args.seeds = args.seeds[:args.ensemble_size]
+    test_loader = make_loader(test_files, args.batch_size, args.num_workers,
+                              shuffle=False, verbose_label="test")
 
     print(f"\n{'='*80}")
-    print(f"Training {args.ensemble_size} Ensemble Models")
-    print(f"Seeds: {args.seeds}")
+    print(f"Training {args.ensemble_size} bootstrapped ensemble models")
+    print(f"Each model trains on {args.ensemble_size - 1}/{args.ensemble_size} partitions (leave-one-out)")
     print(f"{'='*80}")
 
-    # Train ensemble models
-    for seed in args.seeds:
-        train_single_model(seed, train_loader, val_loader, device, args, save_dir)
+    all_summaries = {}
 
+    for model_idx in range(args.ensemble_size):
+        excluded = partitions[model_idx]
+        model_train_files = [f for j, p in enumerate(partitions) if j != model_idx for f in p]
+
+        summary = train_single_model(
+            model_idx=model_idx,
+            excluded_partition=excluded,
+            train_files=model_train_files,
+            test_loader=test_loader,
+            device=device,
+            args=args,
+            save_dir=save_dir,
+        )
+        all_summaries[model_idx] = summary
+
+    # Final summary table
     print(f"\n{'='*80}")
-    print("All Ensemble Models Training Complete!")
-    print(f"Models saved to: {save_dir}")
+    print("ENSEMBLE TRAINING COMPLETE – Final epoch metrics per model")
     print(f"{'='*80}")
+    print(f"{'Model':>6}  {'Test CE':>8}  {'Test Acc':>9}")
+    print("-" * 30)
+    for idx, rows in all_summaries.items():
+        last = rows[-1]
+        print(f"  {idx:4d}  {last['test_ce']:8.4f}  {last['test_acc']:9.4f}")
+
+    test_accs = [r[-1]['test_acc'] for r in all_summaries.values()]
+    test_ces  = [r[-1]['test_ce']  for r in all_summaries.values()]
+    print("-" * 30)
+    print(f"  {'Mean':>4}  {np.mean(test_ces):8.4f}  {np.mean(test_accs):9.4f}")
+    print(f"  {'Std':>4}  {np.std(test_ces):8.4f}  {np.std(test_accs):9.4f}")
+    print(f"\nAll checkpoints saved to: {save_dir}")
 
 
 if __name__ == '__main__':
