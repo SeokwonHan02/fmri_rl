@@ -50,10 +50,10 @@ def get_args():
                         default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_cnn.pt',
                         help='Path to pretrained DQN CNN encoder')
     parser.add_argument('--bc-path', type=str,
-                        default='/Users/seokwon/research/fMRI_RL/pretrained/bc.pth',
+                        default='/Users/seokwon/research/fMRI_RL/pretrained/bc_685_13.pth',
                         help='Path to trained BC model')
     parser.add_argument('--cql-path', type=str,
-                        default='/Users/seokwon/research/fMRI_RL/pretrained/cql.pth',
+                        default='/Users/seokwon/research/fMRI_RL/pretrained/dqn_715_1.pth',
                         help='Path to trained CQL model')
 
     # Misc
