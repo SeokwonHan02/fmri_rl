@@ -5,28 +5,6 @@ import copy
 
 
 class ProbCQL(nn.Module):
-    """
-    Probabilistic Conservative Q-Learning (ProbCQL)
-
-    Architecture
-    ------------
-    CNN (frozen, 3136-dim)
-        ├── fc_mu     → μ      (512)  ┐ reparameterize
-        └── fc_logvar → log σ² (512)  ┘ → z = μ + σ⊙ε  →  Q-head  →  Q(s,a)
-
-    Loss
-    ----
-    L = TD (Huber)  +  α · CQL  +  β_kl · KL( N(μ,σ²) ‖ N(0,I) )
-
-    The KL term (Information Bottleneck) regularises the latent distribution
-    toward N(0,I) and allows the model to express heteroscedastic uncertainty:
-    states that are hard to predict will naturally induce larger σ².
-
-    fMRI Usage
-    ----------
-    Call `encode(state)` to retrieve (μ, log σ²) separately for regression.
-    Call `get_uncertainty(state)` to retrieve (μ, σ², mean σ²) per sample.
-    """
 
     def __init__(self, cnn, action_dim: int = 6,
                  alpha: float = 0.2, beta_kl: float = 1e-3):
@@ -67,45 +45,18 @@ class ProbCQL(nn.Module):
     # ------------------------------------------------------------------
 
     def encode(self, state: torch.Tensor):
-        """
-        Map normalised frames to probabilistic latent parameters.
-
-        Parameters
-        ----------
-        state : (B, 4, 84, 84) float32, values in [0, 1]
-
-        Returns
-        -------
-        mu     : (B, 512)  – latent mean
-        logvar : (B, 512)  – log-variance (clamped to [-10, 2] for stability)
-        """
         feat   = self.cnn(state)                # (B, 3136)
         mu     = self.fc_mu(feat)               # (B, 512)
         logvar = self.fc_logvar(feat).clamp(-10.0, 2.0)  # (B, 512)
         return mu, logvar
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
-        """
-        z = μ + σ ⊙ ε,  ε ~ N(0, I)
-
-        Falls back to μ (no noise) at eval time, giving deterministic
-        action selection while still tracking uncertainty via σ.
-        """
         if self.training:
             std = (0.5 * logvar).exp()
             return mu + std * torch.randn_like(std)
         return mu
 
     def forward(self, state: torch.Tensor):
-        """
-        Full stochastic (train) / deterministic (eval) forward pass.
-
-        Returns
-        -------
-        q_values : (B, action_dim)
-        mu       : (B, 512)
-        logvar   : (B, 512)
-        """
         mu, logvar = self.encode(state)
         z          = self.reparameterize(mu, logvar)
         q_values   = self.q_head(z)
@@ -144,7 +95,6 @@ class ProbCQL(nn.Module):
         return mu, sigma_sq, mean_var
 
     def update_target(self):
-        """Hard-copy fc_mu and Q-head weights to their respective target networks."""
         self.fc_mu_target.load_state_dict(self.fc_mu.state_dict())
         self.q_head_target.load_state_dict(self.q_head.state_dict())
 
@@ -154,10 +104,6 @@ class ProbCQL(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _kl_standard_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    """
-    KL( N(μ, σ²) ‖ N(0, I) ) averaged over batch.
-    = -0.5 · mean_batch[ Σ_d (1 + logvar_d - μ_d² - exp(logvar_d)) ]
-    """
     kl = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp())  # (B, 512)
     return kl.sum(dim=-1).mean()                             # scalar
 
@@ -169,13 +115,6 @@ def _kl_standard_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 def train_prob_cql(model: ProbCQL, dataloader, optimizer, device,
                    gamma: float = 0.99, target_update_freq: int = 100,
                    reward_scale: float = 0.1):
-    """
-    One training epoch for ProbCQL.
-
-    Returns
-    -------
-    avg_td, avg_cql, avg_kl, avg_total, avg_q, avg_var
-    """
     model.train()
     tot_td = tot_cql = tot_kl = tot_total = tot_q = tot_var = 0.0
     n = 0
@@ -241,14 +180,6 @@ def train_prob_cql(model: ProbCQL, dataloader, optimizer, device,
 def val_prob_cql(model: ProbCQL, dataloader, device,
                  gamma: float = 0.99, reward_scale: float = 0.1,
                  action_weights=None):
-    """
-    Validation / test pass for ProbCQL.
-
-    Returns
-    -------
-    avg_td, avg_cql, avg_kl, avg_total, avg_q, avg_var,
-    avg_ce, avg_wce, action_accuracy
-    """
     model.eval()
     tot_td = tot_cql = tot_kl = tot_total = tot_q = tot_var = 0.0
     tot_ce = tot_wce = tot_correct = 0.0
