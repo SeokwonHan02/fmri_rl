@@ -1,11 +1,15 @@
 """
-Train Bootstrapped Ensemble DQN models with Offline RL data.
+Jackknife Bootstrapped Ensemble DQN (offline RL).
 
-Bootstrapped DQN:
-  - Split train files into `ensemble_size` partitions.
-  - Model i trains on all partitions except partition i (leave-one-out).
-  - No two models share the same training subset.
-  - Uncertainty is measured as variance across Q-value predictions.
+Pipeline
+--------
+1. Pool & shuffle  : Load all training transitions into one dataset, globally
+                     shuffle at the transition level.
+2. K-fold split    : Divide the shuffled pool into K=20 non-overlapping,
+                     equal-size folds.
+3. Leave-one-out   : Model i trains on the K-1 folds that exclude fold i.
+                     Implemented via index masking on the shared base dataset
+                     — zero extra memory for duplicated transitions.
 """
 
 import torch
@@ -13,13 +17,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import random
-from pathlib import Path
-from tqdm import tqdm
 import glob
 import argparse
+from pathlib import Path
+from tqdm import tqdm
 
 from dataset import OfflineRLDataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from model.dqn import DQN
 
 
@@ -27,135 +31,134 @@ from model.dqn import DQN
 # Reproducibility
 # ---------------------------------------------------------------------------
 
-def set_seed(seed):
+def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
 # ---------------------------------------------------------------------------
-# Data split helpers
+# Dataset helpers
 # ---------------------------------------------------------------------------
 
-def partition_files(files, n_partitions):
-    """Round-robin assignment of files to n_partitions partitions."""
-    partitions = [[] for _ in range(n_partitions)]
-    for i, f in enumerate(files):
-        partitions[i % n_partitions].append(f)
-    return partitions
-
-
-def prepare_data_split(data_dir, subject, train_indices, test_file_idx, ensemble_size):
+def load_train_test_files(data_dir: str, subject: str,
+                          train_indices: list[int], test_file_idx: int):
     """
-    Split data into bootstrap partitions for the ensemble.
+    Resolve npz file paths from index lists.
 
-    Args:
-        train_indices : list[int] – file indices to use for training
-        test_file_idx : int – file index to use for test
-
-    Returns:
-        partitions  : list[list[str]] – ensemble_size partitions of train files
-        test_files  : list[str]
+    Returns
+    -------
+    train_files : list[str]
+    test_files  : list[str]
     """
     subject_dir = Path(data_dir) / subject
     if not subject_dir.exists():
         raise ValueError(f"Subject directory not found: {subject_dir}")
 
     npz_files = sorted(glob.glob(str(subject_dir / '*.npz')))
-    n_files = len(npz_files)
-
-    if n_files == 0:
-        raise ValueError(f"No npz files found in {subject_dir}")
+    n = len(npz_files)
+    if n == 0:
+        raise ValueError(f"No .npz files in {subject_dir}")
 
     for idx in train_indices:
-        if idx < 0 or idx >= n_files:
-            raise ValueError(f"train_idx {idx} out of range [0, {n_files-1}]")
-    if test_file_idx < 0 or test_file_idx >= n_files:
-        raise ValueError(f"test_file_idx={test_file_idx} out of range [0, {n_files-1}]")
-    if test_file_idx in train_indices:
-        raise ValueError(f"test_file_idx={test_file_idx} must not overlap with train_idx")
+        if not (0 <= idx < n):
+            raise ValueError(f"train_idx {idx} out of range [0, {n-1}]")
+    if not (0 <= test_file_idx < n):
+        raise ValueError(f"test_file_idx={test_file_idx} out of range [0, {n-1}]")
+    if test_file_idx in set(train_indices):
+        raise ValueError(f"test_file_idx={test_file_idx} overlaps with train_idx")
 
     train_files = [npz_files[i] for i in sorted(train_indices)]
     test_files  = [npz_files[test_file_idx]]
-
-    n_train = len(train_files)
-    if n_train < ensemble_size:
-        print(
-            f"[Warning] Only {n_train} train files but ensemble_size={ensemble_size}. "
-            f"Some models may share identical training data."
-        )
-
-    partitions = partition_files(train_files, ensemble_size)
-
-    print(f"\nBootstrap data split:")
-    print(f"  Total files      : {n_files}")
-    print(f"  Train indices    : {sorted(train_indices)}  ({n_train} files)")
-    print(f"  Test  file       : {Path(test_files[0]).name}  (index {test_file_idx})")
-    print(f"  Ensemble size    : {ensemble_size}")
-    print(f"  Partitions (each model excludes one):")
-    for i, p in enumerate(partitions):
-        names = [Path(f).name for f in p]
-        print(f"    partition {i:2d}: {names}")
-
-    return partitions, test_files
+    return train_files, test_files
 
 
-def make_loader(files, batch_size, num_workers, shuffle, verbose_label=None):
-    if verbose_label:
-        print(f"\nLoading {verbose_label} ({len(files)} files)...")
-    dataset = OfflineRLDataset(npz_files=files)
-    use_pin_memory = torch.cuda.is_available()
+def make_kfolds(total_size: int, k: int, seed: int) -> list[np.ndarray]:
+    """
+    Globally shuffle [0, total_size) and split into k equal folds.
+
+    Transitions that don't divide evenly are discarded (at most k-1 dropped).
+
+    Returns
+    -------
+    folds : list of k numpy arrays, each of length (total_size // k)
+    """
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(total_size)
+
+    fold_size = total_size // k
+    n_keep    = fold_size * k          # drop the remainder
+    dropped   = total_size - n_keep
+
+    if dropped > 0:
+        print(f"  [K-fold] Dropped {dropped} transitions to make {k} equal folds "
+              f"of {fold_size} each.")
+
+    perm = perm[:n_keep]
+    folds = np.split(perm, k)         # list of k arrays, each length fold_size
+    return folds
+
+
+def make_loader(dataset, indices: np.ndarray, batch_size: int,
+                num_workers: int, shuffle: bool) -> DataLoader:
+    """
+    Wrap `dataset` with the given `indices` via torch.utils.data.Subset.
+    No data is copied — Subset stores only the index array.
+    """
+    subset = Subset(dataset, indices.tolist())
     return DataLoader(
-        dataset,
+        subset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=use_pin_memory,
+        pin_memory=torch.cuda.is_available(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Target network update
+# ---------------------------------------------------------------------------
+
+def soft_update(policy_net: torch.nn.Module, target_net: torch.nn.Module, tau: float):
+    for tp, pp in zip(target_net.parameters(), policy_net.parameters()):
+        tp.data.copy_(tau * pp.data + (1.0 - tau) * tp.data)
 
 
 # ---------------------------------------------------------------------------
 # Train / Evaluate
 # ---------------------------------------------------------------------------
 
-def soft_update_target(policy_net, target_net, tau):
-    for tp, pp in zip(target_net.parameters(), policy_net.parameters()):
-        tp.data.copy_(tau * pp.data + (1.0 - tau) * tp.data)
-
-
-def train_epoch(model, target_model, dataloader, optimizer, device,
-                gamma=0.99, use_soft_update=True, tau=0.005,
-                update_freq=1000, step_counter=0):
+def train_epoch(model, target_model, loader, optimizer, device,
+                gamma, use_soft_update, tau, update_freq, step_counter):
     model.train()
-    total_loss = total_q = total_samples = 0
+    total_loss = total_q = n = 0
 
-    for batch in dataloader:
+    for batch in loader:
         step_counter += 1
 
-        state      = batch['state'].to(device).float() / 255.0
-        action     = batch['action'].to(device)
-        reward     = batch['reward'].to(device).float()
-        next_state = batch['next_state'].to(device).float() / 255.0
-        done       = batch['done'].to(device).float()
+        s  = batch['state'].to(device).float() / 255.0
+        a  = batch['action'].to(device)
+        r  = batch['reward'].to(device).float()
+        ns = batch['next_state'].to(device).float() / 255.0
+        d  = batch['done'].to(device).float()
 
-        if reward.dim() == 2: reward = reward.squeeze(1)
-        if done.dim()   == 2: done   = done.squeeze(1)
+        if r.dim() == 2: r = r.squeeze(1)
+        if d.dim() == 2: d = d.squeeze(1)
 
-        action_idx = action.argmax(dim=-1) if action.dim() == 2 else action
+        a_idx = a.argmax(dim=-1) if a.dim() == 2 else a.long()
 
-        q_values = model(state)
-        q_value  = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+        q_all = model(s)                                           # (B, A)
+        q_sa  = q_all.gather(1, a_idx.unsqueeze(1)).squeeze(1)    # (B,)
 
         with torch.no_grad():
-            next_q_value = target_model(next_state).max(dim=1)[0]
-            target_q     = reward + gamma * next_q_value * (1 - done)
+            next_q = target_model(ns).max(dim=1)[0]               # (B,)
+            target = r + gamma * next_q * (1.0 - d)               # (B,)
 
-        loss = F.smooth_l1_loss(q_value, target_q)
+        loss = F.smooth_l1_loss(q_sa, target)
 
         optimizer.zero_grad()
         loss.backward()
@@ -163,83 +166,86 @@ def train_epoch(model, target_model, dataloader, optimizer, device,
         optimizer.step()
 
         if use_soft_update:
-            soft_update_target(model, target_model, tau)
+            soft_update(model, target_model, tau)
         elif step_counter % update_freq == 0:
             target_model.load_state_dict(model.state_dict())
 
-        bs = state.size(0)
-        total_loss    += loss.item() * bs
-        total_q       += q_values.mean().item() * bs
-        total_samples += bs
+        bs          = s.size(0)
+        total_loss += loss.item() * bs
+        total_q    += q_all.mean().item() * bs
+        n          += bs
 
-    return total_loss / total_samples, total_q / total_samples, step_counter
+    return total_loss / n, total_q / n, step_counter
 
 
-def evaluate(model, dataloader, device):
+@torch.no_grad()
+def evaluate(model, loader, device):
     """
-    Returns test metrics:
-      avg_ce, action_accuracy
+    Human-action accuracy and CE loss on the test set.
+
+    Q-values are Z-score normalised per sample before computing CE,
+    so the scale of Q does not affect the metric.
+
+    Returns
+    -------
+    ce  : float   – mean cross-entropy (lower = model prefers human actions)
+    acc : float   – fraction of transitions where argmax Q == human action
     """
     model.eval()
-    total_ce = total_correct = total_samples = 0
+    total_ce = total_correct = n = 0
 
-    with torch.no_grad():
-        for batch in dataloader:
-            state  = batch['state'].to(device).float() / 255.0
-            action = batch['action'].to(device)
+    for batch in loader:
+        s = batch['state'].to(device).float() / 255.0
+        a = batch['action'].to(device)
 
-            action_idx = action.argmax(dim=-1) if action.dim() == 2 else action
+        a_idx = a.argmax(dim=-1) if a.dim() == 2 else a.long()
 
-            q_values = model(state)
+        q    = model(s)                                       # (B, A)
+        z    = (q - q.mean(-1, keepdim=True)) / (q.std(-1, keepdim=True) + 1e-8)
 
-            # Z-score normalize Q-values → use as logits for CE
-            q_mean = q_values.mean(dim=-1, keepdim=True)
-            q_std  = q_values.std(dim=-1, keepdim=True) + 1e-8
-            z_vals = (q_values - q_mean) / q_std
+        ce   = F.cross_entropy(z, a_idx, reduction='sum')
+        pred = z.argmax(dim=-1)
 
-            per_sample_ce = F.cross_entropy(z_vals, action_idx, reduction='none')
+        total_ce      += ce.item()
+        total_correct += (pred == a_idx).sum().item()
+        n             += s.size(0)
 
-            bs = state.size(0)
-            total_ce      += per_sample_ce.sum().item()
-            total_correct += (z_vals.argmax(dim=-1) == action_idx).sum().item()
-            total_samples += bs
-
-    return total_ce / total_samples, total_correct / total_samples
+    return total_ce / n, total_correct / n
 
 
 # ---------------------------------------------------------------------------
-# Single model training
+# Train one ensemble member
 # ---------------------------------------------------------------------------
 
-def train_single_model(model_idx, excluded_partition, train_files, test_loader,
-                       device, args, save_dir):
+def train_single_model(model_idx: int, fold_idx: int,
+                       base_dataset, train_indices: np.ndarray,
+                       test_loader, device, args, save_dir: Path):
     """
-    Train one ensemble member.
+    Train model `model_idx` on `train_indices` (all folds except fold `fold_idx`).
 
-    Args:
-        model_idx          : int, index of this ensemble member (0-based)
-        excluded_partition : list[str], files NOT used for this model (for logging)
-        train_files        : list[str], files used for training this model
-        test_loader        : DataLoader for test
-        device             : torch.device
-        args               : parsed arguments
-        save_dir           : Path to save checkpoints
+    Parameters
+    ----------
+    model_idx     : position in the ensemble (0-based)
+    fold_idx      : which fold is excluded (== model_idx in leave-one-out)
+    base_dataset  : shared OfflineRLDataset (read-only, never copied)
+    train_indices : 1-D numpy array of transition indices for this model
+    test_loader   : shared DataLoader for the held-out test file
     """
     seed = args.base_seed + model_idx
 
     print(f"\n{'='*80}")
-    print(f"Model {model_idx:2d} / {args.ensemble_size - 1}  |  seed={seed}")
-    print(f"  Training on  : {len(train_files)} files")
-    print(f"  Excluded     : {[Path(f).name for f in excluded_partition]}")
+    print(f"Model {model_idx:2d}/{args.ensemble_size-1}  |  excluded fold={fold_idx}  |  seed={seed}")
+    print(f"  Train transitions : {len(train_indices):,}  "
+          f"(= {args.ensemble_size-1}/{args.ensemble_size} of pool)")
     print(f"{'='*80}")
 
     set_seed(seed)
 
-    train_loader = make_loader(
-        train_files, args.batch_size, args.num_workers, shuffle=True,
-        verbose_label=f"model {model_idx} train data"
-    )
+    # ---- DataLoader (zero-copy: Subset wraps the shared base_dataset) -------
+    train_loader = make_loader(base_dataset, train_indices,
+                               args.batch_size, args.num_workers, shuffle=True)
 
+    # ---- Model --------------------------------------------------------------
     model        = DQN(action_dim=6).to(device)
     target_model = DQN(action_dim=6).to(device)
     target_model.load_state_dict(model.state_dict())
@@ -248,21 +254,25 @@ def train_single_model(model_idx, excluded_partition, train_files, test_loader,
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    print(f"  Params: {sum(p.numel() for p in model.parameters()):,}  |  "
-          f"LR={args.lr:.2e}  |  "
-          f"Target: {'soft τ=' + str(args.tau) if args.use_soft_update else 'hard freq=' + str(args.target_update_freq)}")
+    print(f"  Params     : {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  LR         : {args.lr:.2e}")
+    print(f"  Target upd : "
+          f"{'soft τ=' + str(args.tau) if args.use_soft_update else 'hard freq=' + str(args.target_update_freq)}")
 
+    # ---- Training loop ------------------------------------------------------
     step_counter = 0
     summary_rows = []
 
-    for epoch in tqdm(range(1, args.epochs + 1), desc=f"Model {model_idx}", unit="epoch"):
+    for epoch in tqdm(range(1, args.epochs + 1),
+                      desc=f"Model {model_idx:02d}", unit="epoch"):
+
         train_loss, train_q, step_counter = train_epoch(
             model, target_model, train_loader, optimizer, device,
-            gamma=args.gamma,
-            use_soft_update=args.use_soft_update,
-            tau=args.tau,
-            update_freq=args.target_update_freq,
-            step_counter=step_counter,
+            gamma          = args.gamma,
+            use_soft_update= args.use_soft_update,
+            tau            = args.tau,
+            update_freq    = args.target_update_freq,
+            step_counter   = step_counter,
         )
 
         test_ce, test_acc = evaluate(model, test_loader, device)
@@ -270,25 +280,23 @@ def train_single_model(model_idx, excluded_partition, train_files, test_loader,
         summary_rows.append({'epoch': epoch, 'test_ce': test_ce, 'test_acc': test_acc})
 
         tqdm.write(
-            f"  [Model {model_idx:2d}] Epoch {epoch:3d}/{args.epochs} | "
-            f"Train Loss={train_loss:.4f} Q={train_q:.2f} | "
-            f"Test CE={test_ce:.4f} Acc={test_acc:.4f}"
+            f"  [Model {model_idx:02d}] Epoch {epoch:3d}/{args.epochs} | "
+            f"Train Loss={train_loss:.4f}  Q={train_q:.3f} | "
+            f"Test  CE={test_ce:.4f}  Acc={test_acc:.4f}"
         )
 
+        # Checkpoint
         if epoch % args.save_interval == 0 or epoch == args.epochs:
-            save_path = save_dir / f'model_{model_idx:02d}_epoch{epoch}.pth'
-            tmp_path  = save_path.with_suffix('.tmp')
-            if device.type == 'mps':
-                torch.mps.synchronize()
-            elif device.type == 'cuda':
-                torch.cuda.synchronize()
-            cpu_sd = {k: v.cpu() for k, v in model.state_dict().items()}
-            torch.save(cpu_sd, tmp_path)
-            tmp_path.replace(save_path)
+            ckpt = save_dir / f'model_{model_idx:02d}_epoch{epoch:03d}.pth'
+            tmp  = ckpt.with_suffix('.tmp')
+            if device.type == 'mps':   torch.mps.synchronize()
+            elif device.type == 'cuda': torch.cuda.synchronize()
+            torch.save({k: v.cpu() for k, v in model.state_dict().items()}, tmp)
+            tmp.replace(ckpt)
 
     last = summary_rows[-1]
-    print(f"\n  Model {model_idx:2d} done | "
-          f"Final Test CE={last['test_ce']:.4f} Acc={last['test_acc']:.4f}")
+    print(f"  Model {model_idx:02d} done | "
+          f"Test CE={last['test_ce']:.4f}  Acc={last['test_acc']:.4f}")
 
     return summary_rows
 
@@ -298,35 +306,44 @@ def train_single_model(model_idx, excluded_partition, train_files, test_loader,
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Bootstrapped Ensemble DQN')
+    parser = argparse.ArgumentParser(
+        description='Jackknife Bootstrapped Ensemble DQN (offline RL)',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
-    # Data
+    # ---- Data ---------------------------------------------------------------
     parser.add_argument('--data_dir', type=str,
                         default='/Users/seokwon/research/fMRI_RL/processed_data_frameskip_4')
     parser.add_argument('--subject', type=str, default='sub_1')
-    parser.add_argument('--train_idx', type=int, nargs='+', default=[0, 1, 2, 3, 4, 7, 8, 9, 10, 11],
-                        help='File indices to use for training (space-separated, e.g. --train_idx 0 1 2 3 4)')
+    parser.add_argument('--train_idx', type=int, nargs='+',
+                        default=[0, 1, 2, 3, 4, 7, 8, 9, 10, 11],
+                        help='File indices for training (space-separated). '
+                             'Example: --train_idx 0 1 2 3 4 7 8 9')
     parser.add_argument('--test_file_idx', type=int, default=6,
-                        help='Index of test file (0-based)')
+                        help='File index for test evaluation')
 
-    # Ensemble
+    # ---- Ensemble -----------------------------------------------------------
     parser.add_argument('--ensemble_size', type=int, default=20,
-                        help='Number of ensemble members (= number of bootstrap partitions)')
+                        help='K: number of folds = number of ensemble members')
     parser.add_argument('--base_seed', type=int, default=42,
-                        help='Base random seed; model i uses base_seed + i')
+                        help='Global shuffle seed and base model seed '
+                             '(model i uses base_seed + i)')
 
-    # Training
+    # ---- Training -----------------------------------------------------------
     parser.add_argument('--epochs',     type=int,   default=25)
     parser.add_argument('--batch_size', type=int,   default=32)
     parser.add_argument('--lr',         type=float, default=1e-4)
     parser.add_argument('--gamma',      type=float, default=0.99)
 
-    # Target network
-    parser.add_argument('--use_soft_update',    action='store_true', default=False)
-    parser.add_argument('--tau',                type=float, default=0.005)
-    parser.add_argument('--target_update_freq', type=int,   default=1000)
+    # ---- Target network -----------------------------------------------------
+    parser.add_argument('--use_soft_update',    action='store_true', default=False,
+                        help='Use soft (Polyak) target update instead of hard copy')
+    parser.add_argument('--tau',                type=float, default=0.005,
+                        help='Soft update rate (only with --use_soft_update)')
+    parser.add_argument('--target_update_freq', type=int,   default=1000,
+                        help='Hard update frequency in gradient steps')
 
-    # System
+    # ---- System -------------------------------------------------------------
     parser.add_argument('--device',        type=str, default='cuda')
     parser.add_argument('--num_workers',   type=int, default=4)
     parser.add_argument('--save_interval', type=int, default=10,
@@ -342,52 +359,96 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"Checkpoints → {save_dir}")
 
-    partitions, test_files = prepare_data_split(
-        args.data_dir, args.subject,
-        args.train_idx, args.test_file_idx,
-        args.ensemble_size,
+    # ------------------------------------------------------------------
+    # 1. Resolve file paths
+    # ------------------------------------------------------------------
+    train_files, test_files = load_train_test_files(
+        args.data_dir, args.subject, args.train_idx, args.test_file_idx
     )
+    print(f"\nTrain files ({len(train_files)}):")
+    for f in train_files:
+        print(f"  {Path(f).name}")
+    print(f"Test  file : {Path(test_files[0]).name}")
 
-    test_loader = make_loader(test_files, args.batch_size, args.num_workers,
-                              shuffle=False, verbose_label="test")
+    # ------------------------------------------------------------------
+    # 2. Load ALL training data into a single shared dataset (once)
+    # ------------------------------------------------------------------
+    print("\nLoading all training transitions into memory (shared pool)...")
+    base_dataset = OfflineRLDataset(npz_files=train_files)
+    N = len(base_dataset)
+    print(f"  Total training transitions: {N:,}")
 
+    # ------------------------------------------------------------------
+    # 3. Global shuffle → K equal folds (index-level, no data copy)
+    # ------------------------------------------------------------------
+    K = args.ensemble_size
+    print(f"\nCreating {K} folds (global seed={args.base_seed})...")
+    folds = make_kfolds(N, K, seed=args.base_seed)
+    fold_size = len(folds[0])
+    print(f"  Fold size       : {fold_size:,} transitions each")
+    print(f"  Train per model : {fold_size * (K-1):,} transitions "
+          f"({(K-1)/K*100:.1f}% of pool)")
+    print(f"  Excluded / model: {fold_size:,} transitions "
+          f"({1/K*100:.1f}% of pool)")
+
+    # ------------------------------------------------------------------
+    # 4. Shared test loader
+    # ------------------------------------------------------------------
+    print(f"\nLoading test data...")
+    test_dataset = OfflineRLDataset(npz_files=test_files)
+    test_loader  = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+    print(f"  Test transitions: {len(test_dataset):,}")
+
+    # ------------------------------------------------------------------
+    # 5. Train K ensemble members sequentially
+    # ------------------------------------------------------------------
     print(f"\n{'='*80}")
-    print(f"Training {args.ensemble_size} bootstrapped ensemble models")
-    print(f"Each model trains on {args.ensemble_size - 1}/{args.ensemble_size} partitions (leave-one-out)")
+    print(f"Jackknife Ensemble: {K} models, leave-one-fold-out")
     print(f"{'='*80}")
 
-    all_summaries = {}
+    all_summaries: dict[int, list[dict]] = {}
 
-    for model_idx in range(args.ensemble_size):
-        excluded = partitions[model_idx]
-        model_train_files = [f for j, p in enumerate(partitions) if j != model_idx for f in p]
+    for model_idx in range(K):
+        # Concatenate all folds except fold model_idx — zero data copy
+        train_indices = np.concatenate(
+            [folds[j] for j in range(K) if j != model_idx]
+        )
 
         summary = train_single_model(
-            model_idx=model_idx,
-            excluded_partition=excluded,
-            train_files=model_train_files,
-            test_loader=test_loader,
-            device=device,
-            args=args,
-            save_dir=save_dir,
+            model_idx    = model_idx,
+            fold_idx     = model_idx,
+            base_dataset = base_dataset,
+            train_indices= train_indices,
+            test_loader  = test_loader,
+            device       = device,
+            args         = args,
+            save_dir     = save_dir,
         )
         all_summaries[model_idx] = summary
 
-    # Final summary table
+    # ------------------------------------------------------------------
+    # 6. Final summary table
+    # ------------------------------------------------------------------
     print(f"\n{'='*80}")
-    print("ENSEMBLE TRAINING COMPLETE – Final epoch metrics per model")
+    print("ENSEMBLE COMPLETE — final-epoch metrics per model")
     print(f"{'='*80}")
-    print(f"{'Model':>6}  {'Test CE':>8}  {'Test Acc':>9}")
-    print("-" * 30)
+    print(f"  {'Model':>5}  {'Test CE':>8}  {'Test Acc':>9}")
+    print(f"  {'-'*28}")
     for idx, rows in all_summaries.items():
         last = rows[-1]
-        print(f"  {idx:4d}  {last['test_ce']:8.4f}  {last['test_acc']:9.4f}")
+        print(f"  {idx:5d}  {last['test_ce']:8.4f}  {last['test_acc']:9.4f}")
 
-    test_accs = [r[-1]['test_acc'] for r in all_summaries.values()]
-    test_ces  = [r[-1]['test_ce']  for r in all_summaries.values()]
-    print("-" * 30)
-    print(f"  {'Mean':>4}  {np.mean(test_ces):8.4f}  {np.mean(test_accs):9.4f}")
-    print(f"  {'Std':>4}  {np.std(test_ces):8.4f}  {np.std(test_accs):9.4f}")
+    ces  = [r[-1]['test_ce']  for r in all_summaries.values()]
+    accs = [r[-1]['test_acc'] for r in all_summaries.values()]
+    print(f"  {'-'*28}")
+    print(f"  {'Mean':>5}  {np.mean(ces):8.4f}  {np.mean(accs):9.4f}")
+    print(f"  {'Std':>5}  {np.std(ces):8.4f}  {np.std(accs):9.4f}")
     print(f"\nAll checkpoints saved to: {save_dir}")
 
 
