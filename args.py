@@ -9,7 +9,7 @@ def get_args():
 
     # Data
     parser.add_argument('--data-dir', type=str,
-                        default='/Users/seokwon/research/fMRI_RL/processed_data',
+                        default='/Users/seokwon/research/fMRI_RL/processed_data_frameskip_4',
                         help='Base directory containing processed data')
     parser.add_argument('--subject', type=str, default='sub_1',
                         choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'],
@@ -18,9 +18,9 @@ def get_args():
                         help='Batch size for training')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
-    parser.add_argument('--val-file-idx', type=int, default=10,
+    parser.add_argument('--val-file-idx', type=int, default=9,
                         help='Index of validation file (0-based)')
-    parser.add_argument('--test-file-idx', type=int, default=11,
+    parser.add_argument('--test-file-idx', type=int, default=10,
                         help='Index of test file (0-based)')
 
     # Model
@@ -39,7 +39,7 @@ def get_args():
                         help='Reward scaling factor')
 
     # CQL / ProbCQL shared
-    parser.add_argument('--cql-alpha', type=float, default=0.2,
+    parser.add_argument('--cql-alpha', type=float, default=0.3,
                         help='CQL regularization weight (shared by cql and prob_cql)')
 
     # ProbCQL specific
