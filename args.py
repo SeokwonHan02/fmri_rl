@@ -55,6 +55,8 @@ def get_args():
     parser.add_argument('--mask-prob', type=float, default=1.0,
                         help='Bernoulli bootstrap mask probability per (sample, head) pair '
                              '(1.0 = all samples per head, 0.5 = half the batch per head)')
+    parser.add_argument('--ce-lambda', type=float, default=1.0,
+                        help='Weight for CE regularization loss in EnsembleDQN (total = td + λ * ce)')
 
     # BCQ specific
     parser.add_argument('--bcq-threshold', type=float, default=0.3,

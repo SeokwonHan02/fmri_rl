@@ -333,9 +333,10 @@ def main():
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'ensemble_dqn':
-            train_td_loss, train_avg_q = train_fn(
+            train_td_loss, train_ce_loss, train_total_loss, train_avg_q = train_fn(
                 model, train_loader, optimizer, device,
-                args.gamma, args.target_update_freq, args.reward_scale, args.mask_prob
+                args.gamma, args.target_update_freq, args.reward_scale, args.mask_prob,
+                args.ce_lambda
             )
 
             val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
@@ -347,10 +348,11 @@ def main():
 
             tqdm.write(
                 f"Epoch {epoch}/{args.epochs}\n"
-                f"  Train - TD Loss: {train_td_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                f"  Val   - TD Loss: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
+                f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                f"  Val   - TD: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
                 f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                f"  Test  - TD Loss: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                f"  Test  - TD: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 

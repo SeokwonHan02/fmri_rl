@@ -76,21 +76,27 @@ class EnsembleDQN(nn.Module):
 
 
 def train_ensemble_dqn(model, dataloader, optimizer, device, gamma=0.99,
-                        target_update_freq=100, reward_scale=0.1, mask_prob=1.0):
+                        target_update_freq=100, reward_scale=0.1, mask_prob=1.0,
+                        ce_lambda=1.0):
     """
-    Train bootstrapped ensemble DQN with Double DQN targets.
+    Train bootstrapped ensemble DQN with Double DQN targets + BC regularization.
 
     Each head uses its own online Q to select the next action (Double DQN),
     then evaluates that action with its own target Q.
     Bernoulli masks provide bootstrap diversity across heads.
+    CE loss on z-score normalized mean Q regularizes toward the data distribution.
+
+    total_loss = td_loss + ce_lambda * ce_loss
 
     Returns:
-        avg_td_loss, avg_q_value
+        avg_td_loss, avg_ce_loss, avg_total_loss, avg_q_value
     """
     model.train()
-    total_td_loss = 0
-    total_q_value = 0
-    total_samples = 0
+    total_td_loss    = 0
+    total_ce_loss    = 0
+    total_total_loss = 0
+    total_q_value    = 0
+    total_samples    = 0
 
     for batch in dataloader:
         model.training_step += 1
@@ -148,8 +154,17 @@ def train_ensemble_dqn(model, dataloader, optimizer, device, gamma=0.99,
         mask_sum = masks.sum().clamp_min(1.0)
         td_loss = (td_loss_per * masks).sum() / mask_sum
 
+        # BC regularization: z-score normalize mean Q, compute CE loss toward data actions
+        mean_q  = current_q_all.mean(dim=1)                            # (batch_size, action_dim)
+        q_mean  = mean_q.mean(dim=-1, keepdim=True)
+        q_std   = mean_q.std(dim=-1, keepdim=True) + 1e-8
+        z_values = (mean_q - q_mean) / q_std
+        ce_loss = F.cross_entropy(z_values, action_idx)
+
+        total_loss = td_loss + ce_lambda * ce_loss
+
         optimizer.zero_grad()
-        td_loss.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.heads.parameters(), 10.0)
         optimizer.step()
 
@@ -157,13 +172,17 @@ def train_ensemble_dqn(model, dataloader, optimizer, device, gamma=0.99,
         if model.training_step % target_update_freq == 0:
             model.update_target()
 
-        total_td_loss += td_loss.item() * batch_size
-        total_q_value += current_q_all.detach().mean().item() * batch_size
-        total_samples += batch_size
+        total_td_loss    += td_loss.item()    * batch_size
+        total_ce_loss    += ce_loss.item()    * batch_size
+        total_total_loss += total_loss.item() * batch_size
+        total_q_value    += mean_q.detach().mean().item() * batch_size
+        total_samples    += batch_size
 
     return (
-        total_td_loss / total_samples,
-        total_q_value / total_samples,
+        total_td_loss    / total_samples,
+        total_ce_loss    / total_samples,
+        total_total_loss / total_samples,
+        total_q_value    / total_samples,
     )
 
 
