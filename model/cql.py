@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
+from .bc import action_to_fire_move
 
 class CQL(nn.Module):
     """
@@ -59,9 +60,12 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1,
+              fire_cql_weight=1.0, move_cql_weight=1.0):
     model.train()
     total_td_loss = 0
+    total_cql_fire_loss = 0
+    total_cql_move_loss = 0
     total_cql_loss = 0
     total_loss_sum = 0
     total_q_value = 0
@@ -87,8 +91,11 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         else:
             action_idx = action
 
+        # Convert action to fire and move labels
+        fire_label, move_label = action_to_fire_move(action_idx)
+
         # Forward pass
-        q_values = model(state)
+        q_values = model(state)  # (batch, 6)
         q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
         # Compute target Q-value
@@ -102,9 +109,26 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         # TD loss (Huber loss for stability)
         td_loss = F.smooth_l1_loss(q_value, target_q)
 
-        # CQL loss: penalize Q-values of all actions, boost Q-value of taken action
-        logsumexp_q = torch.logsumexp(q_values, dim=1)
-        cql_loss = (logsumexp_q - q_value).mean()
+        # Marginalize Q-values into fire and move dimensions
+        # Fire: fire=0 (NOOP, RIGHT, LEFT) vs fire=1 (FIRE, RIGHT+FIRE, LEFT+FIRE)
+        fire_q = torch.stack([
+            torch.logsumexp(q_values[:, [0, 2, 3]], dim=1),  # fire=0
+            torch.logsumexp(q_values[:, [1, 4, 5]], dim=1),  # fire=1
+        ], dim=1)  # (batch, 2)
+
+        # Move: move=0 (NOOP, FIRE) vs move=1 (RIGHT, RIGHT+FIRE) vs move=2 (LEFT, LEFT+FIRE)
+        move_q = torch.stack([
+            torch.logsumexp(q_values[:, [0, 1]], dim=1),  # move=0
+            torch.logsumexp(q_values[:, [2, 4]], dim=1),  # move=1
+            torch.logsumexp(q_values[:, [3, 5]], dim=1),  # move=2
+        ], dim=1)  # (batch, 3)
+
+        # CQL loss: per-dimension (fire and move)
+        fire_q_value = fire_q.gather(1, fire_label.unsqueeze(1)).squeeze(1)
+        move_q_value = move_q.gather(1, move_label.unsqueeze(1)).squeeze(1)
+        cql_fire_loss = (torch.logsumexp(fire_q, dim=1) - fire_q_value).mean()
+        cql_move_loss = (torch.logsumexp(move_q, dim=1) - move_q_value).mean()
+        cql_loss = fire_cql_weight * cql_fire_loss + move_cql_weight * cql_move_loss
 
         # Total loss: TD loss + CQL regularization
         total_loss = td_loss + model.alpha * cql_loss
@@ -122,23 +146,30 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
 
         # Statistics
         total_td_loss += td_loss.item() * state.size(0)
+        total_cql_fire_loss += cql_fire_loss.item() * state.size(0)
+        total_cql_move_loss += cql_move_loss.item() * state.size(0)
         total_cql_loss += cql_loss.item() * state.size(0)
         total_loss_sum += total_loss.item() * state.size(0)
         total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
 
     avg_td_loss = total_td_loss / total_samples
+    avg_cql_fire_loss = total_cql_fire_loss / total_samples
+    avg_cql_move_loss = total_cql_move_loss / total_samples
     avg_cql_loss = total_cql_loss / total_samples
     avg_total_loss = total_loss_sum / total_samples
     avg_q_value = total_q_value / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_cql_fire_loss, avg_cql_move_loss
 
 
-def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None):
+def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None,
+            fire_cql_weight=1.0, move_cql_weight=1.0):
     """Validation function for CQL with detailed metrics"""
     model.eval()
     total_td_loss = 0
+    total_cql_fire_loss = 0
+    total_cql_move_loss = 0
     total_cql_loss = 0
     total_loss_sum = 0
     total_q_value = 0
@@ -167,8 +198,11 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             else:
                 action_idx = action
 
+            # Convert action to fire and move labels
+            fire_label, move_label = action_to_fire_move(action_idx)
+
             # Forward pass
-            q_values = model(state)
+            q_values = model(state)  # (batch, 6)
             q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
 
             # Compute target Q-value
@@ -180,9 +214,24 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             # TD loss
             td_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # CQL loss
-            logsumexp_q = torch.logsumexp(q_values, dim=1)
-            cql_loss = (logsumexp_q - q_value).mean()
+            # Marginalize Q-values into fire and move dimensions
+            fire_q = torch.stack([
+                torch.logsumexp(q_values[:, [0, 2, 3]], dim=1),  # fire=0
+                torch.logsumexp(q_values[:, [1, 4, 5]], dim=1),  # fire=1
+            ], dim=1)  # (batch, 2)
+
+            move_q = torch.stack([
+                torch.logsumexp(q_values[:, [0, 1]], dim=1),  # move=0
+                torch.logsumexp(q_values[:, [2, 4]], dim=1),  # move=1
+                torch.logsumexp(q_values[:, [3, 5]], dim=1),  # move=2
+            ], dim=1)  # (batch, 3)
+
+            # CQL loss: per-dimension (fire and move)
+            fire_q_value = fire_q.gather(1, fire_label.unsqueeze(1)).squeeze(1)
+            move_q_value = move_q.gather(1, move_label.unsqueeze(1)).squeeze(1)
+            cql_fire_loss = (torch.logsumexp(fire_q, dim=1) - fire_q_value).mean()
+            cql_move_loss = (torch.logsumexp(move_q, dim=1) - move_q_value).mean()
+            cql_loss = fire_cql_weight * cql_fire_loss + move_cql_weight * cql_move_loss
 
             # Total loss
             total_loss = td_loss + model.alpha * cql_loss
@@ -196,21 +245,25 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             action_pred = z_values.argmax(dim=-1)
 
             # Statistics
-            total_td_loss  += td_loss.item()    * state.size(0)
-            total_cql_loss += cql_loss.item()   * state.size(0)
-            total_loss_sum += total_loss.item() * state.size(0)
-            total_q_value  += q_values.mean().item() * state.size(0)
-            total_ce_loss  += ce_loss.item()    * state.size(0)
-            total_wce_loss += wce_loss.item()   * state.size(0)
-            total_correct  += (action_pred == action_idx).sum().item()
-            total_samples  += state.size(0)
+            total_td_loss      += td_loss.item()          * state.size(0)
+            total_cql_fire_loss += cql_fire_loss.item()   * state.size(0)
+            total_cql_move_loss += cql_move_loss.item()   * state.size(0)
+            total_cql_loss     += cql_loss.item()         * state.size(0)
+            total_loss_sum     += total_loss.item()       * state.size(0)
+            total_q_value      += q_values.mean().item()  * state.size(0)
+            total_ce_loss      += ce_loss.item()          * state.size(0)
+            total_wce_loss     += wce_loss.item()         * state.size(0)
+            total_correct      += (action_pred == action_idx).sum().item()
+            total_samples      += state.size(0)
 
-    avg_td_loss    = total_td_loss    / total_samples
-    avg_cql_loss   = total_cql_loss   / total_samples
-    avg_total_loss = total_loss_sum   / total_samples
-    avg_q_value    = total_q_value    / total_samples
-    avg_ce_loss    = total_ce_loss    / total_samples
-    avg_wce_loss   = total_wce_loss   / total_samples
-    action_accuracy = total_correct   / total_samples
+    avg_td_loss      = total_td_loss      / total_samples
+    avg_cql_fire_loss = total_cql_fire_loss / total_samples
+    avg_cql_move_loss = total_cql_move_loss / total_samples
+    avg_cql_loss     = total_cql_loss     / total_samples
+    avg_total_loss   = total_loss_sum     / total_samples
+    avg_q_value      = total_q_value      / total_samples
+    avg_ce_loss      = total_ce_loss      / total_samples
+    avg_wce_loss     = total_wce_loss     / total_samples
+    action_accuracy  = total_correct      / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy, avg_cql_fire_loss, avg_cql_move_loss
