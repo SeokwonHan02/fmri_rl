@@ -354,9 +354,9 @@ def main():
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
-            # Save model every save_interval epochs
+            # Save heads only (CNN is always the same pretrained encoder)
             if epoch % args.save_interval == 0:
-                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                torch.save(model.heads.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         # ===== EVALUATION =====
