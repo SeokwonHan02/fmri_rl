@@ -142,11 +142,27 @@ def build_loaders(args):
 
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def train(model: RND, loader: DataLoader, device: torch.device,
-          epochs: int, lr: float, save_dir: Path):
+def _eval_loss(model: RND, loader: DataLoader, device: torch.device) -> float:
+    """Compute mean prediction error MSE on a DataLoader (no grad)."""
+    model.eval()
+    total = 0.0
+    n = 0
+    with torch.no_grad():
+        for batch in loader:
+            x = batch['state'][:, -1:, :, :].to(device).float() / 255.0
+            pred_feat, target_feat = model(x)
+            total += ((pred_feat - target_feat) ** 2).mean().item() * x.size(0)
+            n     += x.size(0)
+    return total / n
+
+
+def train(model: RND, loader: DataLoader, test_loader: DataLoader,
+          device: torch.device, epochs: int, lr: float, save_dir: Path,
+          loss_scale: float = 1000.0):
     """
     Train only the predictor network.
     Saves epoch_{n}.pth after every epoch.
+    loss_scale: multiply loss values for display only (raw values stored in checkpoint).
     """
     optimizer = torch.optim.Adam(model.predictor.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -174,27 +190,42 @@ def train(model: RND, loader: DataLoader, device: torch.device,
             epoch_loss += loss.item()
             n_batches  += 1
 
-        avg_loss = epoch_loss / n_batches
-        history.append(dict(epoch=epoch, loss=avg_loss))
-        scheduler.step(avg_loss)
+        avg_train = epoch_loss / n_batches
+        avg_test  = _eval_loss(model, test_loader, device)
 
-        print(f"  Epoch {epoch:3d}/{epochs}  loss={avg_loss:.6f}")
+        # Restore train mode after eval
+        model.predictor.train()
+        model.target.eval()
+
+        history.append(dict(epoch=epoch, train=avg_train, test=avg_test))
+        scheduler.step(avg_train)
+
+        print(f"  Epoch {epoch:3d}/{epochs}  "
+              f"train={avg_train * loss_scale:.4f}  "
+              f"test={avg_test  * loss_scale:.4f}  "
+              f"(×{loss_scale:.0f})")
 
         torch.save({
             'epoch':       epoch,
             'predictor':   model.predictor.state_dict(),
             'target':      model.target.state_dict(),
             'optimizer':   optimizer.state_dict(),
-            'loss':        avg_loss,
+            'train_loss':  avg_train,
+            'test_loss':   avg_test,
             'feature_dim': model.feature_dim,
         }, save_dir / f'epoch_{epoch}.pth')
 
-    # Training curve
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot([h['epoch'] for h in history],
-            [h['loss']  for h in history], color='steelblue')
-    ax.set_xlabel('Epoch'); ax.set_ylabel('Prediction Error (MSE)')
-    ax.set_title('RND Training Loss'); ax.grid(alpha=0.3)
+    # Training curve (scaled for readability)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    epochs_ax = [h['epoch'] for h in history]
+    ax.plot(epochs_ax, [h['train'] * loss_scale for h in history],
+            color='steelblue', label='Train')
+    ax.plot(epochs_ax, [h['test']  * loss_scale for h in history],
+            color='coral',     label='Test')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel(f'Prediction Error (MSE ×{loss_scale:.0f})')
+    ax.set_title('RND Training Loss')
+    ax.legend(); ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_dir / 'training_curve.png', dpi=120, bbox_inches='tight')
     plt.close()
@@ -262,7 +293,7 @@ def main():
     print("\n" + "="*60)
     print("Loading data")
     print("="*60)
-    train_loader, _ = build_loaders(args)
+    train_loader, test_loader = build_loaders(args)
 
     print("\n" + "="*60)
     print("Initializing RND")
@@ -277,7 +308,7 @@ def main():
     print("\n" + "="*60)
     print("Training predictor")
     print("="*60)
-    train(model, train_loader, device, args.epochs, args.lr, save_dir)
+    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir)
 
     print(f"\nDone. Checkpoints saved to: {save_dir}")
 
