@@ -14,6 +14,7 @@ from model import (
     BCQ, train_bcq, val_bcq,
     CQL, train_cql, val_cql,
     ProbCQL, train_prob_cql, val_prob_cql,
+    EnsembleDQN, train_ensemble_dqn, val_ensemble_dqn,
 )
 from eval import evaluate_agent
 
@@ -184,6 +185,12 @@ def main():
         val_fn = val_prob_cql
         print(f"ProbCQL: α={args.cql_alpha}, β_kl={args.prob_cql_beta_kl}")
 
+    elif args.algo == 'ensemble_dqn':
+        model = EnsembleDQN(cnn, num_heads=args.num_heads, action_dim=6)
+        train_fn = train_ensemble_dqn
+        val_fn = val_ensemble_dqn
+        print(f"EnsembleDQN: {args.num_heads} heads, mask_prob={args.mask_prob}")
+
     else:
         raise ValueError(f"Unknown algorithm: {args.algo}")
 
@@ -317,6 +324,33 @@ def main():
                 f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
                 f"  Test  - TD: {test_td:.4f}, CQL: {test_cql_loss:.4f}, KL: {test_kl:.4f}, "
                 f"Total: {test_total:.4f}, Q: {test_avg_q:.2f}, Var: {test_avg_var:.4f}\n"
+                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+            )
+
+            # Save model every save_interval epochs
+            if epoch % args.save_interval == 0:
+                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
+
+        elif args.algo == 'ensemble_dqn':
+            train_td_loss, train_avg_q = train_fn(
+                model, train_loader, optimizer, device,
+                args.gamma, args.target_update_freq, args.reward_scale, args.mask_prob
+            )
+
+            val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
+                model, val_loader, device, args.gamma, args.reward_scale, action_weights
+            )
+            test_td_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                model, test_loader, device, args.gamma, args.reward_scale, action_weights
+            )
+
+            tqdm.write(
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - TD Loss: {train_td_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                f"  Val   - TD Loss: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                f"  Test  - TD Loss: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 

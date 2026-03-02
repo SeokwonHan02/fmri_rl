@@ -4,8 +4,9 @@ def get_args():
     parser = argparse.ArgumentParser(description='Offline RL for Space Invaders')
 
     # Algorithm selection
-    parser.add_argument('--algo', type=str, default='bc', choices=['bc', 'bcq', 'cql', 'prob_cql'],
-                        help='Algorithm to use: bc, bcq, cql, or prob_cql')
+    parser.add_argument('--algo', type=str, default='bc',
+                        choices=['bc', 'bcq', 'cql', 'prob_cql', 'ensemble_dqn'],
+                        help='Algorithm to use: bc, bcq, cql, prob_cql, or ensemble_dqn')
 
     # Data
     parser.add_argument('--data-dir', type=str,
@@ -47,6 +48,13 @@ def get_args():
                         help='KL divergence (Information Bottleneck) weight for prob_cql')
     parser.add_argument('--target-update-freq', type=int, default=100,
                         help='Target network update frequency')
+
+    # EnsembleDQN specific
+    parser.add_argument('--num-heads', type=int, default=50,
+                        help='Number of MLP heads in EnsembleDQN (default: 50)')
+    parser.add_argument('--mask-prob', type=float, default=1.0,
+                        help='Bernoulli bootstrap mask probability per (sample, head) pair '
+                             '(1.0 = all samples per head, 0.5 = half the batch per head)')
 
     # BCQ specific
     parser.add_argument('--bcq-threshold', type=float, default=0.3,

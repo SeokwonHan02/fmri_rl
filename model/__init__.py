@@ -3,6 +3,7 @@ from .bc import BehaviorCloning, train_bc, val_bc
 from .bcq import BCQ, train_bcq, val_bcq
 from .cql import CQL, train_cql, val_cql
 from .prob_cql import ProbCQL, train_prob_cql, val_prob_cql
+from .ensemble_dqn import EnsembleDQN, train_ensemble_dqn, val_ensemble_dqn
 
 __all__ = [
     'DQN_CNN',
@@ -20,4 +21,7 @@ __all__ = [
     'ProbCQL',
     'train_prob_cql',
     'val_prob_cql',
+    'EnsembleDQN',
+    'train_ensemble_dqn',
+    'val_ensemble_dqn',
 ]
