@@ -151,7 +151,7 @@ def _eval_loss(model: RND, loader: DataLoader, device: torch.device) -> float:
         for batch in loader:
             x = batch['state'][:, -1:, :, :].to(device).float() / 255.0
             pred_feat, target_feat = model(x)
-            total += ((pred_feat - target_feat) ** 2).mean().item() * x.size(0)
+            total += ((pred_feat - target_feat) ** 2).mean(dim=1).sum().item()
             n     += x.size(0)
     return total / n
 

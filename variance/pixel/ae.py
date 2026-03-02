@@ -1,7 +1,7 @@
 """
-vae.py
+ae.py
 
-Variational Autoencoder 기반 pixel novelty 측정.
+Autoencoder 기반 pixel novelty 측정.
 
 입력: 4-frame stack의 마지막 frame (1채널, 84x84), /255.0 정규화.
 학습 split: expanding window — test_file_idx 이전 파일들만 사용.
@@ -36,26 +36,24 @@ from dataset import OfflineRLDataset
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 
-class VAEEncoder(nn.Module):
-    """Conv encoder: (1, 84, 84) → (mu, logvar) each of shape (latent_dim,)"""
+class AEEncoder(nn.Module):
+    """Conv encoder: (1, 84, 84) → (latent_dim,)"""
     def __init__(self, latent_dim: int = 256):
         super().__init__()
-        self.conv = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=8, stride=4), nn.ReLU(),  # → (32, 20, 20)
             nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(), # → (64,  9,  9)
             nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(), # → (64,  7,  7)
             nn.Flatten(),                                           # → 3136
+            nn.Linear(3136, 512), nn.ReLU(),
+            nn.Linear(512, latent_dim),
         )
-        self.fc     = nn.Sequential(nn.Linear(3136, 512), nn.ReLU())
-        self.mu     = nn.Linear(512, latent_dim)
-        self.logvar = nn.Linear(512, latent_dim)
 
     def forward(self, x):
-        h = self.fc(self.conv(x))
-        return self.mu(h), self.logvar(h)
+        return self.net(x)
 
 
-class VAEDecoder(nn.Module):
+class AEDecoder(nn.Module):
     """Conv decoder: (latent_dim,) → (1, 84, 84) in [0, 1]"""
     def __init__(self, latent_dim: int = 256):
         super().__init__()
@@ -65,8 +63,8 @@ class VAEDecoder(nn.Module):
         )
         self.deconv = nn.Sequential(
             nn.Unflatten(1, (64, 7, 7)),
-            nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),   # → (64, 9, 9)
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2), nn.ReLU(),   # → (32, 20, 20)
+            nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),    # → (64, 9, 9)
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2), nn.ReLU(),    # → (32, 20, 20)
             nn.ConvTranspose2d(32,  1, kernel_size=8, stride=4), nn.Sigmoid(), # → (1, 84, 84)
         )
 
@@ -74,9 +72,9 @@ class VAEDecoder(nn.Module):
         return self.deconv(self.fc(z))
 
 
-class VAE(nn.Module):
+class AE(nn.Module):
     """
-    VAE for single Atari frame (1-channel, last of 4-stack).
+    Autoencoder for single Atari frame (1-channel, last of 4-stack).
 
     Novelty score = per-frame reconstruction MSE (averaged over H×W).
     High score → unfamiliar / out-of-distribution frame.
@@ -84,45 +82,28 @@ class VAE(nn.Module):
     def __init__(self, latent_dim: int = 256):
         super().__init__()
         self.latent_dim = latent_dim
-        self.encoder = VAEEncoder(latent_dim)
-        self.decoder = VAEDecoder(latent_dim)
-
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            std = (0.5 * logvar).exp()
-            return mu + std * torch.randn_like(std)
-        return mu  # deterministic at eval time
+        self.encoder = AEEncoder(latent_dim)
+        self.decoder = AEDecoder(latent_dim)
 
     def forward(self, x: torch.Tensor):
-        """x: (B, 1, 84, 84). Returns (recon, mu, logvar)."""
-        mu, logvar = self.encoder(x)
-        z = self.reparameterize(mu, logvar)
+        """x: (B, 1, 84, 84). Returns (recon, z)."""
+        z     = self.encoder(x)
         recon = self.decoder(z)
-        return recon, mu, logvar
+        return recon, z
 
     @torch.no_grad()
     def novelty_score(self, x: torch.Tensor) -> torch.Tensor:
         """Per-frame reconstruction MSE. x ∈ [0, 1]. Returns (B,)."""
         self.eval()
-        recon, _, _ = self.forward(x)
+        recon, _ = self.forward(x)
         return ((recon - x) ** 2).mean(dim=(1, 2, 3))
 
 
 # ─── Loss ────────────────────────────────────────────────────────────────────
 
-def vae_loss(recon: torch.Tensor, x: torch.Tensor,
-             mu: torch.Tensor, logvar: torch.Tensor,
-             beta: float = 1.0):
-    """
-    ELBO loss = MSE reconstruction + beta * KL divergence.
-
-    recon_loss: mean over batch of sum over pixels
-    kl_loss:    mean over batch of KL per latent dimension
-    """
-    recon_loss = F.mse_loss(recon, x, reduction='none').sum(dim=(1, 2, 3)).mean()
-    kl_loss    = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
-    total = recon_loss + beta * kl_loss
-    return total, recon_loss.item(), kl_loss.item()
+def ae_loss(recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Reconstruction loss: mean over batch of sum over pixels."""
+    return F.mse_loss(recon, x, reduction='none').sum(dim=(1, 2, 3)).mean()
 
 
 # ─── Data helpers ─────────────────────────────────────────────────────────────
@@ -163,31 +144,24 @@ def build_loaders(args):
 
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def _eval_loss(model: VAE, loader: DataLoader, device: torch.device,
-               beta: float) -> tuple:
-    """Compute mean total/recon/kl loss on a DataLoader (no grad)."""
+def _eval_loss(model: AE, loader: DataLoader, device: torch.device) -> float:
+    """Compute mean reconstruction loss on a DataLoader (no grad)."""
     model.eval()
-    total_sum = recon_sum = kl_sum = 0.0
+    total = 0.0
     n = 0
     with torch.no_grad():
         for batch in loader:
             x = batch['state'][:, -1:, :, :].to(device).float() / 255.0
-            recon, mu, logvar = model(x)
-            b = x.size(0)
-            recon_l = F.mse_loss(recon, x, reduction='none').sum(dim=(1, 2, 3)).sum().item()
-            kl_l    = (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1)).sum().item()
-            total_sum += (recon_l + beta * kl_l)
-            recon_sum += recon_l
-            kl_sum    += kl_l
-            n         += b
-    return total_sum / n, recon_sum / n, kl_sum / n
+            recon, _ = model(x)
+            total += F.mse_loss(recon, x, reduction='none').sum(dim=(1, 2, 3)).sum().item()
+            n     += x.size(0)
+    return total / n
 
 
-def train(model: VAE, loader: DataLoader, test_loader: DataLoader,
-          device: torch.device, epochs: int, lr: float, beta: float,
-          save_dir: Path):
+def train(model: AE, loader: DataLoader, test_loader: DataLoader,
+          device: torch.device, epochs: int, lr: float, save_dir: Path):
     """
-    Train the VAE. Saves epoch_{n}.pth after every epoch.
+    Train the AE. Saves epoch_{n}.pth after every epoch.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -197,66 +171,48 @@ def train(model: VAE, loader: DataLoader, test_loader: DataLoader,
 
     for epoch in range(1, epochs + 1):
         model.train()
-        total_loss = recon_sum = kl_sum = 0.0
+        total_loss = 0.0
         n_batches  = 0
 
         for batch in tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
             x = batch['state'][:, -1:, :, :].to(device).float() / 255.0  # (B, 1, 84, 84)
             optimizer.zero_grad()
-            recon, mu, logvar = model(x)
-            loss, recon_loss, kl_loss = vae_loss(recon, x, mu, logvar, beta)
+            recon, _ = model(x)
+            loss = ae_loss(recon, x)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
-            recon_sum  += recon_loss
-            kl_sum     += kl_loss
             n_batches  += 1
 
-        avg_total = total_loss / n_batches
-        avg_recon = recon_sum  / n_batches
-        avg_kl    = kl_sum     / n_batches
-
-        test_total, test_recon, test_kl = _eval_loss(model, test_loader, device, beta)
+        avg_train = total_loss / n_batches
+        avg_test  = _eval_loss(model, test_loader, device)
         model.train()
 
-        history.append(dict(
-            epoch=epoch,
-            train_total=avg_total, train_recon=avg_recon, train_kl=avg_kl,
-            test_total=test_total,  test_recon=test_recon,  test_kl=test_kl,
-        ))
-        scheduler.step(avg_total)
+        history.append(dict(epoch=epoch, train=avg_train, test=avg_test))
+        scheduler.step(avg_train)
 
         print(f"  Epoch {epoch:3d}/{epochs}  "
-              f"train=({avg_total:.2f} / {avg_recon:.2f} / {avg_kl:.2f})  "
-              f"test=({test_total:.2f} / {test_recon:.2f} / {test_kl:.2f})  "
-              f"[total/recon/kl]")
+              f"train={avg_train:.2f}  test={avg_test:.2f}")
 
         torch.save({
-            'epoch':       epoch,
-            'model':       model.state_dict(),
-            'optimizer':   optimizer.state_dict(),
-            'train_loss':  avg_total,
-            'test_loss':   test_total,
-            'latent_dim':  model.latent_dim,
-            'beta':        beta,
+            'epoch':      epoch,
+            'model':      model.state_dict(),
+            'optimizer':  optimizer.state_dict(),
+            'train_loss': avg_train,
+            'test_loss':  avg_test,
+            'latent_dim': model.latent_dim,
         }, save_dir / f'epoch_{epoch}.pth')
 
-    # Training curve — train vs test for total/recon/kl
-    epochs_axis = [h['epoch'] for h in history]
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    for ax, key, color in zip(axes,
-                               ['total', 'recon', 'kl'],
-                               ['steelblue', 'coral', 'mediumseagreen']):
-        ax.plot(epochs_axis, [h[f'train_{key}'] for h in history],
-                color=color, label='Train')
-        ax.plot(epochs_axis, [h[f'test_{key}']  for h in history],
-                color=color, linestyle='--', label='Test')
-        ax.set_xlabel('Epoch'); ax.set_ylabel('Loss')
-        ax.set_title(key.capitalize() + ' Loss')
-        ax.legend(); ax.grid(alpha=0.3)
-    plt.suptitle('VAE Training Loss', fontsize=13, fontweight='bold')
+    # Training curve
+    fig, ax = plt.subplots(figsize=(9, 4))
+    epochs_ax = [h['epoch'] for h in history]
+    ax.plot(epochs_ax, [h['train'] for h in history], color='steelblue', label='Train')
+    ax.plot(epochs_ax, [h['test']  for h in history], color='coral',     label='Test')
+    ax.set_xlabel('Epoch'); ax.set_ylabel('Reconstruction Loss (pixel sum MSE)')
+    ax.set_title('AE Training Loss')
+    ax.legend(); ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_dir / 'training_curve.png', dpi=120, bbox_inches='tight')
     plt.close()
@@ -281,7 +237,7 @@ def get_device(preferred: str) -> torch.device:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='VAE Pixel Novelty — Training')
+    parser = argparse.ArgumentParser(description='AE Pixel Novelty — Training')
 
     # Data
     parser.add_argument('--data_dir',      type=str,
@@ -291,9 +247,7 @@ def main():
                         help='Index of test file; files 0..test_file_idx-1 used for training')
 
     # Model
-    parser.add_argument('--latent_dim', type=int,   default=256)
-    parser.add_argument('--beta',       type=float, default=1.0,
-                        help='KL weight in ELBO loss')
+    parser.add_argument('--latent_dim', type=int, default=256)
 
     # Training
     parser.add_argument('--epochs',      type=int,   default=20)
@@ -303,7 +257,7 @@ def main():
 
     # Output
     parser.add_argument('--save_dir', type=str,
-                        default=str(_SCRIPT_DIR / 'vae_results'))
+                        default=str(_SCRIPT_DIR / 'ae_results'))
 
     # System
     parser.add_argument('--device', type=str, default='auto')
@@ -321,7 +275,7 @@ def main():
 
     print(f"Device   : {device}")
     print(f"Save dir : {save_dir}")
-    print(f"Latent   : {args.latent_dim}  beta={args.beta}  epochs={args.epochs}")
+    print(f"Latent   : {args.latent_dim}  epochs={args.epochs}")
 
     print("\n" + "="*60)
     print("Loading data")
@@ -329,9 +283,9 @@ def main():
     train_loader, test_loader = build_loaders(args)
 
     print("\n" + "="*60)
-    print("Initializing VAE")
+    print("Initializing AE")
     print("="*60)
-    model = VAE(latent_dim=args.latent_dim).to(device)
+    model = AE(latent_dim=args.latent_dim).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Trainable parameters: {n_params:,}")
     print(f"  Input               : last frame (1-channel, 84×84) / 255")
@@ -339,7 +293,7 @@ def main():
     print("\n" + "="*60)
     print("Training")
     print("="*60)
-    train(model, train_loader, test_loader, device, args.epochs, args.lr, args.beta, save_dir)
+    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir)
 
     print(f"\nDone. Checkpoints saved to: {save_dir}")
 

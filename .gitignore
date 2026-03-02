@@ -8,7 +8,11 @@ process_game2_data_fixed.py
 render_episodes/
 analyze_action_distribution.py
 rnd_visualize.py
+rnd_vis_results/
 vae_visualize.py
+ae_visualize.py
+*.pth
+
 
 *.err
 *.out
