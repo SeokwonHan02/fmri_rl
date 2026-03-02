@@ -150,7 +150,7 @@ def train(model: RND, loader: DataLoader, device: torch.device,
     """
     optimizer = torch.optim.Adam(model.predictor.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=3, factor=0.5, verbose=True)
+        optimizer, patience=3, factor=0.5)
 
     history = []
 
