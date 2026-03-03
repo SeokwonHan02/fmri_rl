@@ -8,9 +8,11 @@ process_game2_data_fixed.py
 render_episodes/
 analyze_action_distribution.py
 rnd_visualize.py
-rnd_vis_results/
+rnd_vis/
 vae_visualize.py
+vae_vis/
 ae_visualize.py
+ae_vis/
 *.pth
 
 

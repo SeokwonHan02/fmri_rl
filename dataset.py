@@ -125,13 +125,12 @@ def create_dataloader(data_dir, batch_size, subject, num_workers=4, shuffle=True
 def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
                                   val_file_idx=10, test_file_idx=11):
     """
-    Create train / val / test dataloaders with a serial split.
+    Create train / val / test dataloaders with an expanding window split.
 
-    Serial split (respects temporal order of data):
-      - train : files with index  < val_file_idx  (indices 0 .. val_file_idx-1)
+    Expanding window (respects temporal order of data):
+      - train : files with index < val_file_idx  (indices 0 .. val_file_idx-1)
       - val   : file  with index == val_file_idx
-      - test  : file  with index == test_file_idx  (must be > val_file_idx)
-      - ignored: all other indices
+      - test  : file  with index == test_file_idx
 
     Args:
         data_dir: Base directory containing processed data
@@ -157,13 +156,12 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
     if val_file_idx == test_file_idx:
         raise ValueError(f"val_file_idx and test_file_idx must be different")
 
-    exclude = {val_file_idx, test_file_idx}
-    train_files = [f for i, f in enumerate(npz_files) if i not in exclude]
+    train_files = [f for i, f in enumerate(npz_files) if i < val_file_idx]
     val_files   = [npz_files[val_file_idx]]
     test_files  = [npz_files[test_file_idx]]
 
-    train_indices = [i for i in range(n_files) if i not in exclude]
-    print(f"\nSplitting data:")
+    train_indices = list(range(val_file_idx))
+    print(f"\nSplitting data (expanding window):")
     print(f"  Total files    : {n_files}")
     print(f"  Train files    : {len(train_files)}  (indices {train_indices})")
     print(f"  Val  file      : {Path(npz_files[val_file_idx]).name}  (index {val_file_idx})")
