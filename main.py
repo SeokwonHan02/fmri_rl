@@ -6,6 +6,13 @@ import random
 from pathlib import Path
 from tqdm import tqdm
 
+
+def safe_save(obj, path: Path):
+    path = Path(path)
+    tmp  = path.with_suffix('.tmp')
+    torch.save(obj, tmp)
+    tmp.replace(path)
+
 from args import get_args
 from dataset import create_train_val_dataloaders
 from model import (
@@ -358,7 +365,7 @@ def main():
 
             # Save heads only (CNN is always the same pretrained encoder)
             if epoch % args.save_interval == 0:
-                torch.save(model.heads.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                safe_save(model.heads.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         # ===== EVALUATION =====

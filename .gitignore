@@ -13,6 +13,9 @@ vae_visualize.py
 vae_vis/
 ae_visualize.py
 ae_vis/
+ensemble_visualize.py
+ensemble_vis/
+*.csv
 *.pth
 
 
