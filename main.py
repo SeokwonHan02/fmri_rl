@@ -356,22 +356,28 @@ def main():
                 args.ce_lambda
             )
 
-            val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
-                model, val_loader, device, args.gamma, args.reward_scale, action_weights
-            )
-            test_td_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
-                model, test_loader, device, args.gamma, args.reward_scale, action_weights
-            )
-
-            tqdm.write(
-                f"Epoch {epoch}/{args.epochs}\n"
-                f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
-                f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                f"  Val   - TD: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                f"  Test  - TD: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
-                f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-            )
+            if args.all_data:
+                tqdm.write(
+                    f"Epoch {epoch}/{args.epochs}\n"
+                    f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
+                    f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}"
+                )
+            else:
+                val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
+                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                )
+                test_td_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                )
+                tqdm.write(
+                    f"Epoch {epoch}/{args.epochs}\n"
+                    f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
+                    f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
+                    f"  Val   - TD: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                    f"  Test  - TD: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                )
 
             # Save heads only (CNN is always the same pretrained encoder)
             if epoch % args.save_interval == 0:
