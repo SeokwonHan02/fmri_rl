@@ -158,10 +158,10 @@ def _eval_loss(model: RND, loader: DataLoader, device: torch.device) -> float:
 
 def train(model: RND, loader: DataLoader, test_loader: DataLoader,
           device: torch.device, epochs: int, lr: float, save_dir: Path,
-          loss_scale: float = 1000.0):
+          loss_scale: float = 1000.0, save_iter: int = 100):
     """
     Train only the predictor network.
-    Saves epoch_{n}.pth after every epoch.
+    Saves epoch_{n}.pth every save_iter epochs (and always at the last epoch).
     loss_scale: multiply loss values for display only (raw values stored in checkpoint).
     """
     optimizer = torch.optim.Adam(model.predictor.parameters(), lr=lr)
@@ -205,15 +205,16 @@ def train(model: RND, loader: DataLoader, test_loader: DataLoader,
               f"test={avg_test  * loss_scale:.4f}  "
               f"(×{loss_scale:.0f})")
 
-        torch.save({
-            'epoch':       epoch,
-            'predictor':   model.predictor.state_dict(),
-            'target':      model.target.state_dict(),
-            'optimizer':   optimizer.state_dict(),
-            'train_loss':  avg_train,
-            'test_loss':   avg_test,
-            'feature_dim': model.feature_dim,
-        }, save_dir / f'epoch_{epoch}.pth')
+        if epoch % save_iter == 0 or epoch == epochs:
+            torch.save({
+                'epoch':       epoch,
+                'predictor':   model.predictor.state_dict(),
+                'target':      model.target.state_dict(),
+                'optimizer':   optimizer.state_dict(),
+                'train_loss':  avg_train,
+                'test_loss':   avg_test,
+                'feature_dim': model.feature_dim,
+            }, save_dir / f'epoch_{epoch}.pth')
 
     # Training curve (scaled for readability)
     fig, ax = plt.subplots(figsize=(9, 4))
@@ -264,6 +265,8 @@ def main():
 
     # Training
     parser.add_argument('--epochs',      type=int,   default=10)
+    parser.add_argument('--save_iter',   type=int,   default=100,
+                        help='체크포인트 저장 주기 (epoch 단위); 마지막 epoch은 항상 저장')
     parser.add_argument('--batch_size',  type=int,   default=256)
     parser.add_argument('--lr',          type=float, default=1e-3)
     parser.add_argument('--num_workers', type=int,   default=0)
@@ -308,7 +311,8 @@ def main():
     print("\n" + "="*60)
     print("Training predictor")
     print("="*60)
-    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir)
+    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir,
+          save_iter=args.save_iter)
 
     print(f"\nDone. Checkpoints saved to: {save_dir}")
 

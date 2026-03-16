@@ -1,5 +1,5 @@
 from .dqn import DQN_CNN, DQN, load_pretrained_cnn
-from .bc import BehaviorCloning, train_bc, val_bc
+from .bc import BehaviorCloning, train_bc, val_bc, action_to_fire_move
 from .bcq import BCQ, train_bcq, val_bcq
 from .cql import CQL, train_cql, val_cql
 from .prob_cql import ProbCQL, train_prob_cql, val_prob_cql
@@ -10,6 +10,7 @@ __all__ = [
     'DQN',
     'load_pretrained_cnn',
     'BehaviorCloning',
+    'action_to_fire_move',
     'train_bc',
     'val_bc',
     'BCQ',

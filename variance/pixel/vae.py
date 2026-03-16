@@ -185,9 +185,9 @@ def _eval_loss(model: VAE, loader: DataLoader, device: torch.device,
 
 def train(model: VAE, loader: DataLoader, test_loader: DataLoader,
           device: torch.device, epochs: int, lr: float, beta: float,
-          save_dir: Path):
+          save_dir: Path, save_iter: int = 100):
     """
-    Train the VAE. Saves epoch_{n}.pth after every epoch.
+    Train the VAE. Saves epoch_{n}.pth every save_iter epochs (and always at the last epoch).
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -233,15 +233,16 @@ def train(model: VAE, loader: DataLoader, test_loader: DataLoader,
               f"test=({test_total:.2f} / {test_recon:.2f} / {test_kl:.2f})  "
               f"[total/recon/kl]")
 
-        torch.save({
-            'epoch':       epoch,
-            'model':       model.state_dict(),
-            'optimizer':   optimizer.state_dict(),
-            'train_loss':  avg_total,
-            'test_loss':   test_total,
-            'latent_dim':  model.latent_dim,
-            'beta':        beta,
-        }, save_dir / f'epoch_{epoch}.pth')
+        if epoch % save_iter == 0 or epoch == epochs:
+            torch.save({
+                'epoch':       epoch,
+                'model':       model.state_dict(),
+                'optimizer':   optimizer.state_dict(),
+                'train_loss':  avg_total,
+                'test_loss':   test_total,
+                'latent_dim':  model.latent_dim,
+                'beta':        beta,
+            }, save_dir / f'epoch_{epoch}.pth')
 
     # Training curve — train vs test for total/recon/kl
     epochs_axis = [h['epoch'] for h in history]
@@ -297,6 +298,8 @@ def main():
 
     # Training
     parser.add_argument('--epochs',      type=int,   default=20)
+    parser.add_argument('--save_iter',   type=int,   default=100,
+                        help='체크포인트 저장 주기 (epoch 단위); 마지막 epoch은 항상 저장')
     parser.add_argument('--batch_size',  type=int,   default=256)
     parser.add_argument('--lr',          type=float, default=3e-4)
     parser.add_argument('--num_workers', type=int,   default=0)
@@ -339,7 +342,8 @@ def main():
     print("\n" + "="*60)
     print("Training")
     print("="*60)
-    train(model, train_loader, test_loader, device, args.epochs, args.lr, args.beta, save_dir)
+    train(model, train_loader, test_loader, device, args.epochs, args.lr, args.beta, save_dir,
+          save_iter=args.save_iter)
 
     print(f"\nDone. Checkpoints saved to: {save_dir}")
 

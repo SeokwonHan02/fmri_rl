@@ -4,6 +4,7 @@ __pycache__/
 pretrained/
 processed_data_frameskip_4/
 
+utils.py
 process_game2_data_fixed.py
 render_episodes/
 analyze_action_distribution.py
@@ -15,8 +16,11 @@ ae_visualize.py
 ae_vis/
 ensemble_visualize.py
 ensemble_vis/
+analyze_uncertainty_corr.py
+mat/
 *.csv
 *.pth
+*.png
 
 
 *.err

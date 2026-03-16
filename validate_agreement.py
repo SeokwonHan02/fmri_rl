@@ -5,30 +5,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 from dataset import create_train_val_dataloaders
-from model import BCQ, CQL, BehaviorCloning
-
-
-def action_to_fire_move(action):
-    """
-    Convert action index to fire and move labels
-
-    Action mapping:
-    - 0: NOOP       -> fire=0, move=0
-    - 1: FIRE       -> fire=1, move=0
-    - 2: RIGHT      -> fire=0, move=1
-    - 3: LEFT       -> fire=0, move=2
-    - 4: RIGHT+FIRE -> fire=1, move=1
-    - 5: LEFT+FIRE  -> fire=1, move=2
-    """
-    # Fire mapping: 0->0, 1->1, 2->0, 3->0, 4->1, 5->1
-    fire_map = torch.tensor([0, 1, 0, 0, 1, 1], dtype=torch.long, device=action.device)
-    fire_label = fire_map[action]
-
-    # Move mapping: 0->0, 1->0, 2->1, 3->2, 4->1, 5->2
-    move_map = torch.tensor([0, 0, 1, 2, 1, 2], dtype=torch.long, device=action.device)
-    move_label = move_map[action]
-
-    return fire_label, move_label
+from model import BCQ, CQL, BehaviorCloning, action_to_fire_move
 
 
 def get_validation_args():

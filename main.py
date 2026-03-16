@@ -1,20 +1,12 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
 from pathlib import Path
 from tqdm import tqdm
 
-
-def safe_save(obj, path: Path):
-    path = Path(path)
-    tmp  = path.with_suffix('.tmp')
-    torch.save(obj, tmp)
-    tmp.replace(path)
-
 from args import get_args
-from dataset import create_train_val_dataloaders
+from dataset import create_train_val_dataloaders, create_all_data_dataloader
 from model import (
     load_pretrained_cnn,
     BehaviorCloning, train_bc, val_bc,
@@ -24,6 +16,14 @@ from model import (
     EnsembleDQN, train_ensemble_dqn, val_ensemble_dqn,
 )
 from eval import evaluate_agent
+
+
+def safe_save(obj, path: Path):
+    """원자적 저장: tmp 파일에 먼저 쓴 뒤 rename해 EOCD 누락 방지."""
+    path = Path(path)
+    tmp  = path.with_suffix('.tmp')
+    torch.save(obj, tmp)
+    tmp.replace(path)
 
 
 def set_seed(seed):
@@ -135,17 +135,27 @@ def main():
     print(f"Models will be saved to: {save_dir}")
 
     print("\nLoading data...")
-    train_loader, val_loader, test_loader = create_train_val_dataloaders(
-        args.data_dir,
-        batch_size=args.batch_size,
-        subject=args.subject,
-        num_workers=args.num_workers,
-        val_file_idx=args.val_file_idx,
-        test_file_idx=args.test_file_idx,
-    )
-    print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Val batches            : {len(val_loader)}")
-    print(f"Test batches           : {len(test_loader)}")
+    if args.all_data:
+        all_loader = create_all_data_dataloader(
+            args.data_dir,
+            batch_size=args.batch_size,
+            subject=args.subject,
+            num_workers=args.num_workers,
+        )
+        train_loader = val_loader = test_loader = all_loader
+        print(f"All-data mode: {len(all_loader)} batches per epoch (train = val = test)")
+    else:
+        train_loader, val_loader, test_loader = create_train_val_dataloaders(
+            args.data_dir,
+            batch_size=args.batch_size,
+            subject=args.subject,
+            num_workers=args.num_workers,
+            val_file_idx=args.val_file_idx,
+            test_file_idx=args.test_file_idx,
+        )
+        print(f"Train batches per epoch: {len(train_loader)}")
+        print(f"Val batches            : {len(val_loader)}")
+        print(f"Test batches           : {len(test_loader)}")
 
     print("\nLoading pretrained DQN CNN (frozen)...")
     cnn = load_pretrained_cnn(args.dqn_path, freeze=True)
@@ -245,9 +255,9 @@ def main():
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}"
             )
 
-            # Save model every save_interval epochs
+            # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
-                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'bcq':
@@ -271,9 +281,9 @@ def main():
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
-            # Save model every save_interval epochs
+            # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
-                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'cql':
@@ -297,9 +307,9 @@ def main():
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
-            # Save model every save_interval epochs
+            # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
-                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'prob_cql':
@@ -334,9 +344,9 @@ def main():
                 f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
             )
 
-            # Save model every save_interval epochs
+            # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
-                torch.save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         elif args.algo == 'ensemble_dqn':

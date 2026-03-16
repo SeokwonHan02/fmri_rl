@@ -86,7 +86,11 @@ def load_pretrained_cnn(pretrained_path, freeze=True):
     cnn = DQN_CNN()
 
     try:
-        checkpoint = torch.load(pretrained_path, map_location='cpu')
+        try:
+            from utils import robust_torch_load
+            checkpoint = robust_torch_load(pretrained_path, map_location='cpu')
+        except ImportError:
+            checkpoint = torch.load(pretrained_path, map_location='cpu')
 
         # Extract policy_net if checkpoint has the full training state
         if 'policy_net' in checkpoint:
@@ -123,10 +127,7 @@ def load_pretrained_cnn(pretrained_path, freeze=True):
         print(f"✗ Error loading pretrained CNN: {e}")
         raise
 
-    # Always freeze encoder
-    if not freeze:
-        raise ValueError("Encoder must always be frozen (freeze=True)")
-
+    # Always freeze encoder regardless of freeze argument
     for param in cnn.parameters():
         param.requires_grad = False
     print(f"✓ CNN frozen (all conv layers)")

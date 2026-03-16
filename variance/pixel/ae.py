@@ -159,9 +159,10 @@ def _eval_loss(model: AE, loader: DataLoader, device: torch.device) -> float:
 
 
 def train(model: AE, loader: DataLoader, test_loader: DataLoader,
-          device: torch.device, epochs: int, lr: float, save_dir: Path):
+          device: torch.device, epochs: int, lr: float, save_dir: Path,
+          save_iter: int = 100):
     """
-    Train the AE. Saves epoch_{n}.pth after every epoch.
+    Train the AE. Saves epoch_{n}.pth every save_iter epochs (and always at the last epoch).
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -196,14 +197,15 @@ def train(model: AE, loader: DataLoader, test_loader: DataLoader,
         print(f"  Epoch {epoch:3d}/{epochs}  "
               f"train={avg_train:.2f}  test={avg_test:.2f}")
 
-        torch.save({
-            'epoch':      epoch,
-            'model':      model.state_dict(),
-            'optimizer':  optimizer.state_dict(),
-            'train_loss': avg_train,
-            'test_loss':  avg_test,
-            'latent_dim': model.latent_dim,
-        }, save_dir / f'epoch_{epoch}.pth')
+        if epoch % save_iter == 0 or epoch == epochs:
+            torch.save({
+                'epoch':      epoch,
+                'model':      model.state_dict(),
+                'optimizer':  optimizer.state_dict(),
+                'train_loss': avg_train,
+                'test_loss':  avg_test,
+                'latent_dim': model.latent_dim,
+            }, save_dir / f'epoch_{epoch}.pth')
 
     # Training curve
     fig, ax = plt.subplots(figsize=(9, 4))
@@ -251,6 +253,8 @@ def main():
 
     # Training
     parser.add_argument('--epochs',      type=int,   default=20)
+    parser.add_argument('--save_iter',   type=int,   default=100,
+                        help='체크포인트 저장 주기 (epoch 단위); 마지막 epoch은 항상 저장')
     parser.add_argument('--batch_size',  type=int,   default=256)
     parser.add_argument('--lr',          type=float, default=3e-4)
     parser.add_argument('--num_workers', type=int,   default=0)
@@ -293,7 +297,8 @@ def main():
     print("\n" + "="*60)
     print("Training")
     print("="*60)
-    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir)
+    train(model, train_loader, test_loader, device, args.epochs, args.lr, save_dir,
+          save_iter=args.save_iter)
 
     print(f"\nDone. Checkpoints saved to: {save_dir}")
 

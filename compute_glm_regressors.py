@@ -2,44 +2,56 @@
 compute_glm_regressors.py
 
 GLM regressor matrix 생성.
+여러 file_idx를 한 번에 처리해 12개의 MAT 파일과 1개의 CSV 파일로 출력한다.
 
-출력 CSV columns (순서):
-  time                 game time [s]
-  [intercept]          optional
-  action               0-5 integer (human action index)
-  action_change        1 if action changed from previous frame, else 0
-  reward               raw reward value
-  death                1 if done (death/life event), else 0
-  frame_diff_mse       pixel-wise MSE between consecutive frames (last channel)
-  u_pixel_ae           AE reconstruction MSE
-  u_pixel_vae          VAE reconstruction MSE
-  u_pixel_rnd          RND prediction error
-  u_q_unc_kendall      1 - Kendall's W (rank disagreement)
-  u_q_vote_disagree    1 - max_vote / n_heads
-  u_q_zscore_std       Z-score std of ensemble top-1 action
-  u_q_adv_gap_var      variance of (Q_top1 - Q_top2) across heads
+Pixel novelty (3종):
+  u_pixel_ae             AE reconstruction MSE
+  u_pixel_vae            VAE reconstruction MSE
+  u_pixel_rnd            RND prediction error
 
-사용 예:
-  python compute_glm_regressors.py \\
-      --subject sub_1 --file_idx 10 \\
-      --ae_path  variance/pixel/ae_831_100.pth \\
-      --vae_path variance/pixel/vae_830_100.pth \\
-      --rnd_path variance/pixel/rnd_829_100.pth \\
-      --ensemble_path variance/q-level/ensemble_825_70.pth \\
-      --output regressors_sub1_f10.csv
+Q-level uncertainty (4종):
+  u_q_unc_kendall        1 - Kendall's W (rank disagreement, ↑=uncertain)
+  u_q_vote_disagree      1 - max_vote / n_heads (↑=uncertain)
+  u_q_zscore_std         Z-score std of ensemble top-1 action (↑=uncertain)
+  u_q_zscore_human       Z-score std of human-chosen action across heads (↑=uncertain)
+
+HRF 처리:
+  SPM canonical HRF (double-gamma, 32s), dt=0.05s fine grid
+  event regressors   : impulse at frame time → HRF conv → TR 샘플링 → z-score
+  continuous regressors: piecewise-constant → HRF conv → TR 샘플링 → z-score
+  TR = 1.0s, 스캔 구조: 60s pre-rest + ~480s game + 60s post-rest = 600 TRs
+  게임 구간 regressors는 HRF conv 후 z-score; 전/후 휴식 구간은 0-패딩
+
+출력 MAT 파일 (36개, run × 조합별):
+  regressors_{subject}_f{fidx}_{pixel}_{unc}.mat
+  R 행 수: ~600 (pre60 + game TRs + post60), 열 구조:
+    action_fire             HRF-convolved onset event × 5  (5 cols)
+    action_right            (NOOP은 baseline으로 제외; onset = action bout 시작 프레임)
+    action_left
+    action_right_fire
+    action_left_fire
+    reward                  HRF-convolved event (raw magnitude)  (1 col)
+    terminal                HRF-convolved event            (1 col)
+    frame_diff_mse          HRF-convolved continuous       (1 col)
+    u_pixel_{type}          HRF-convolved continuous       (1 col)
+    u_q_{type}              HRF-convolved continuous       (1 col)
+  모든 regressor는 run별 z-score 정규화됨 (HRF 이후, 600TR 전체 기준)
+  MAT 메타데이터 (GLM regressor 아님):
+    time      TR 시간축 (0, 1, ..., N_tr-1)
+    file_idx  npz 파일 인덱스 (scalar)
+
+출력 CSV 파일 (1개, 상관분석용):
+  run별로 연결된 비-block 형태의 모든 regressors
 """
 
 import sys
 import argparse
 import glob
-import io
-import pickle
-import zipfile
-import struct
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import scipy.io
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -48,6 +60,8 @@ _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / 'variance' / 'pixel'))
 sys.path.insert(0, str(_ROOT / 'variance' / 'q-level'))
+
+from utils import robust_torch_load
 
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -58,25 +72,22 @@ def get_args():
     # Data
     p.add_argument('--data_dir', default=str(_ROOT / 'processed_data_frameskip_4'))
     p.add_argument('--subject',  default='sub_1',
-                   choices=['sub_1','sub_2','sub_3','sub_4','sub_5','sub_6'])
-    p.add_argument('--file_idx', type=int, default=10,
-                   help='npz 파일 인덱스 (0-based)')
+                   choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'])
+    p.add_argument('--file_idx', nargs='+', type=int, default=[8, 9, 10],
+                   help='npz 파일 인덱스 (0-based), 여러 개 가능 (예: --file_idx 8 9 10)')
 
     # Model paths
     p.add_argument('--dqn_path',      default=str(_ROOT / 'pretrained' / 'dqn_cnn.pt'),
                    help='Pretrained DQN CNN checkpoint (CNN encoder용)')
-    p.add_argument('--ae_path',       default=str(_ROOT / 'variance/pixel/ae_831_100.pth'))
-    p.add_argument('--vae_path',      default=str(_ROOT / 'variance/pixel/vae_830_100.pth'))
-    p.add_argument('--rnd_path',      default=str(_ROOT / 'variance/pixel/rnd_829_100.pth'))
-    p.add_argument('--ensemble_path', default=str(_ROOT / 'variance/q-level/ensemble_825_70.pth'))
+    p.add_argument('--ae_path',       default=str(_ROOT / 'trained_models/sub_1_ae.pth'))
+    p.add_argument('--vae_path',      default=str(_ROOT / 'trained_models/sub_1_vae.pth'))
+    p.add_argument('--rnd_path',      default=str(_ROOT / 'trained_models/sub_1_rnd.pth'))
+    p.add_argument('--ensemble_path', default=str(_ROOT / 'trained_models/sub_1_dqn.pth'))
 
     # Options
-    p.add_argument('--intercept',   action='store_true', default=False,
-                   help='intercept column(상수 1) 포함')
     p.add_argument('--batch_size',  type=int, default=256)
     p.add_argument('--device',      default='auto')
-    p.add_argument('--output',      default=None,
-                   help='출력 CSV 경로 (기본: regressors_{subject}_f{file_idx}.csv)')
+    p.add_argument('--out_dir',     default=str(_ROOT / 'mat'))
 
     return p.parse_args()
 
@@ -95,7 +106,7 @@ def resolve_device(spec: str) -> torch.device:
 
 def load_ae(path: str, device: torch.device):
     from ae import AE
-    ck = torch.load(path, map_location='cpu', weights_only=False)
+    ck = robust_torch_load(path)
     m  = AE(latent_dim=ck['latent_dim']).to(device)
     m.load_state_dict(ck['model'])
     m.eval()
@@ -106,7 +117,7 @@ def load_ae(path: str, device: torch.device):
 
 def load_vae(path: str, device: torch.device):
     from vae import VAE
-    ck = torch.load(path, map_location='cpu', weights_only=False)
+    ck = robust_torch_load(path)
     m  = VAE(latent_dim=ck['latent_dim']).to(device)
     m.load_state_dict(ck['model'])
     m.eval()
@@ -117,7 +128,7 @@ def load_vae(path: str, device: torch.device):
 
 def load_rnd(path: str, device: torch.device):
     from rnd import RND
-    ck = torch.load(path, map_location='cpu', weights_only=False)
+    ck = robust_torch_load(path)
     m  = RND(feature_dim=ck['feature_dim']).to(device)
     m.predictor.load_state_dict(ck['predictor'])
     m.target.load_state_dict(ck['target'])
@@ -127,102 +138,31 @@ def load_rnd(path: str, device: torch.device):
     return m
 
 
-# ─── Ensemble DQN loader (zip EOCD 복구 포함) ────────────────────────────────
-
-def _repair_zip_eocd(path: str) -> bytes:
-    with open(path, 'rb') as f:
-        data = f.read()
-    total  = len(data)
-    LFH_SZ = 30
-    DD_SZ   = 16
-
-    lfh_pos = sorted(i for i in range(total - 4) if data[i:i+4] == b'PK\x03\x04')
-    entries = []
-    for pos in lfh_pos:
-        (_, ver, flags, comp, mt, md, _, _, _, fnl, exl) = \
-            struct.unpack_from('<4sHHHHHIIIHH', data, pos)
-        fn  = data[pos + LFH_SZ : pos + LFH_SZ + fnl].decode('utf-8', errors='replace')
-        ds  = pos + LFH_SZ + fnl + exl
-        entries.append((pos, fn, ver, flags, comp, mt, md, fnl, exl, ds))
-
-    file_entries = []
-    for i, (pos, fn, ver, flags, comp, mt, md, fnl, exl, ds) in enumerate(entries):
-        nxt = entries[i+1][0] if i+1 < len(entries) else total
-        cand = data[nxt - DD_SZ : nxt]
-        if cand[:4] == b'PK\x07\x08':
-            _, crc, sz, _ = struct.unpack('<4sIII', cand)
-        else:
-            import zlib
-            sz  = nxt - ds
-            crc = zlib.crc32(data[ds:ds+sz]) & 0xFFFFFFFF
-        file_entries.append((pos, fn, ver, flags & ~0x08, comp, mt, md,
-                              crc, fnl, exl, ds, sz))
-
-    out = bytearray(data)
-    for (pos, fn, ver, flags, comp, mt, md, crc, fnl, exl, ds, sz) in file_entries:
-        struct.pack_into('<H', out, pos + 6,  flags)
-        struct.pack_into('<I', out, pos + 14, crc)
-        struct.pack_into('<I', out, pos + 18, sz)
-        struct.pack_into('<I', out, pos + 22, sz)
-
-    cd_off = total
-    cd = bytearray()
-    for (pos, fn, ver, flags, comp, mt, md, crc, fnl, exl, ds, sz) in file_entries:
-        fb = fn.encode('utf-8')
-        cd += struct.pack('<4sHHHHHHIIIHHHHHII',
-            b'PK\x01\x02', 20, ver, flags, comp, mt, md,
-            crc, sz, sz, len(fb), 0, 0, 0, 0, 0, pos) + fb
-
-    n = len(file_entries)
-    eocd = struct.pack('<4sHHHHIIH', b'PK\x05\x06', 0, 0, n, n, len(cd), cd_off, 0)
-    return bytes(out) + bytes(cd) + bytes(eocd)
-
+# ─── Ensemble DQN loader ──────────────────────────────────────────────────────
 
 def _load_heads_sd(path: str) -> dict:
-    try:
-        sd = torch.load(path, map_location='cpu', weights_only=False)
-        if isinstance(sd, dict):
-            return sd
-    except Exception:
-        pass
+    """
+    Ensemble heads state dict 로드.
 
-    buf = io.BytesIO(_repair_zip_eocd(path))
-    with zipfile.ZipFile(buf, 'r') as zf:
-        names  = zf.namelist()
-        prefix = names[0].split('/')[0] + '/'
-        pkl_d  = zf.read(f'{prefix}data.pkl')
-        storages = {}
-        for name in names:
-            if name.startswith(f'{prefix}data/') and name != f'{prefix}data/':
-                key = name.split('/')[-1]
-                raw = zf.read(name)
-                storages[key] = torch.from_numpy(
-                    np.frombuffer(raw, dtype='<f4').copy())
-
-    class _UP(pickle.Unpickler):
-        def find_class(self, mod, nm):
-            if mod == 'torch._utils' and nm == '_rebuild_tensor_v2':
-                def rb(st, off, sz, str_, *a):
-                    return st.as_strided(sz, str_, off).clone()
-                return rb
-            return super().find_class(mod, nm)
-        def persistent_load(self, pid):
-            _, _, key, _, n = pid
-            if key not in storages:
-                return torch.zeros(n)
-            s = storages[key]
-            if len(s) < n:
-                s = torch.cat([s, torch.zeros(n - len(s))])
-            return s
-
-    return _UP(io.BytesIO(pkl_d)).load()
+    robust_torch_load를 사용하므로 EOCD가 없는 구형 모델도 자동 복구된다.
+    - 신형 모델: torch.load가 직접 성공 → 복구 경로 미사용
+    - 구형 모델: torch.load 실패 → EOCD 복구 후 재로드
+    """
+    sd = robust_torch_load(path)
+    if isinstance(sd, dict):
+        return sd
+    raise RuntimeError(
+        f"Loaded object from {path} is not a dict (type: {type(sd)}). "
+        "Expected an OrderedDict (model.heads.state_dict())."
+    )
 
 
 def load_ensemble(path: str, dqn_path: str, device: torch.device):
     from model.dqn import load_pretrained_cnn
 
-    sd  = _load_heads_sd(path)
-    # 완전한 head 수 감지
+    sd = _load_heads_sd(path)
+
+    # head 수 자동 감지: 키 패턴 '0.0.weight', '1.0.weight', ...
     n = 0
     while f'{n}.0.weight' in sd and tuple(sd[f'{n}.0.weight'].shape) == (512, 3136):
         n += 1
@@ -239,9 +179,10 @@ def load_ensemble(path: str, dqn_path: str, device: torch.device):
                 nn.Sequential(nn.Linear(3136, 512), nn.ReLU(), nn.Linear(512, 6))
                 for _ in range(n)
             ])
+
         def forward(self, x):
             f = self.cnn(x)
-            return torch.stack([h(f) for h in self.heads], dim=1)  # (B,H,6)
+            return torch.stack([h(f) for h in self.heads], dim=1)  # (B, H, 6)
 
     model = _Ens().to(device)
     for p in model.cnn.parameters():
@@ -258,7 +199,7 @@ def load_ensemble(path: str, dqn_path: str, device: torch.device):
 def batched(arr, batch_size):
     """numpy array를 batch_size 단위로 yield."""
     for i in range(0, len(arr), batch_size):
-        yield i, arr[i:i+batch_size]
+        yield i, arr[i:i + batch_size]
 
 
 def compute_pixel_novelty(model, states_uint8: np.ndarray,
@@ -276,19 +217,25 @@ def compute_pixel_novelty(model, states_uint8: np.ndarray,
     return np.concatenate(out)
 
 
-def compute_q_uncertainty(model, states_uint8: np.ndarray,
+def compute_q_uncertainty(model, states_uint8: np.ndarray, actions: np.ndarray,
                            batch_size: int, device: torch.device) -> dict:
     """
     states_uint8: (N, 4, 84, 84) uint8
+    actions:      (N,) int32 – human action indices (argmax of one-hot)
     returns: dict of (N,) arrays for each of 4 uncertainty metrics
     """
-    kw, vd, zs, ag = [], [], [], []
+    kw, vd, zs, zh = [], [], [], []
     with torch.no_grad():
-        for _, batch in tqdm(list(batched(states_uint8, batch_size)),
+        for i, batch in tqdm(list(batched(states_uint8, batch_size)),
                              desc='    q-uncertainty', leave=False):
             x = torch.from_numpy(batch).to(device).float() / 255.0
             q_all = model(x)          # (B, H, A)
             B, H, A = q_all.shape
+
+            # shared z-score computation (per-head, per-action)
+            q_mu  = q_all.mean(dim=-1, keepdim=True)
+            q_sig = q_all.std(dim=-1, keepdim=True).clamp_min(1e-8)
+            z_all = (q_all - q_mu) / q_sig  # (B, H, A)
 
             # 1. unc_kendall = 1 - W
             ranks = torch.argsort(torch.argsort(q_all, dim=-1), dim=-1).float()
@@ -308,120 +255,366 @@ def compute_q_uncertainty(model, states_uint8: np.ndarray,
             # 3. Z-score std of ensemble top-1 action
             mean_q = q_all.mean(dim=1)
             top1_a = mean_q.argmax(dim=-1)
-            q_mu   = q_all.mean(dim=-1, keepdim=True)
-            q_sig  = q_all.std(dim=-1, keepdim=True).clamp_min(1e-8)
-            z_all  = (q_all - q_mu) / q_sig
             t1_idx = top1_a.view(B, 1, 1).expand(B, H, 1)
             zs.append(z_all.gather(-1, t1_idx).squeeze(-1).std(dim=-1).cpu().numpy())
 
-            # 4. advantage gap variance (top1 - top2)
-            _, top2_idx = mean_q.topk(2, dim=-1)
-            q_t1 = q_all.gather(-1, top2_idx[:,0].view(B,1,1).expand(B,H,1)).squeeze(-1)
-            q_t2 = q_all.gather(-1, top2_idx[:,1].view(B,1,1).expand(B,H,1)).squeeze(-1)
-            ag.append((q_t1 - q_t2).var(dim=-1).cpu().numpy())
+            # 4. Z-score std of human-chosen action
+            ha_idx = torch.from_numpy(actions[i:i + B]).to(device).long()
+            ha_idx = ha_idx.view(B, 1, 1).expand(B, H, 1)
+            zh.append(z_all.gather(-1, ha_idx).squeeze(-1).std(dim=-1).cpu().numpy())
 
     return {
         'u_q_unc_kendall':   np.concatenate(kw),
         'u_q_vote_disagree': np.concatenate(vd),
         'u_q_zscore_std':    np.concatenate(zs),
-        'u_q_adv_gap_var':   np.concatenate(ag),
+        'u_q_zscore_human':  np.concatenate(zh),
     }
+
+
+# ─── HRF helpers ──────────────────────────────────────────────────────────────
+
+def spm_hrf(dt: float = 0.05, t_end: float = 32.0) -> np.ndarray:
+    """
+    SPM canonical HRF (double-gamma, canonical only — no derivative).
+    SPM12 default parameters: peak at ~5s, undershoot at ~15s.
+    """
+    from scipy.stats import gamma as _gamma
+    t = np.arange(0.0, t_end, dt)
+    h = (_gamma.pdf(t, 6.0, scale=1.0)
+         - _gamma.pdf(t, 16.0, scale=1.0) / 6.0)
+    h /= h.max()          # peak-normalize (SPM convention)
+    return h.astype(np.float64)
+
+
+def build_fine_regressor(t_frames: np.ndarray, values: np.ndarray,
+                          fine_t: np.ndarray, kind: str) -> np.ndarray:
+    """
+    Construct regressor signal on a fine time grid.
+
+    kind='continuous': piecewise-constant; values[i] holds over [t_frames[i], t_frames[i+1]).
+    kind='event'     : delta impulse at t_frames[i] scaled by values[i].
+    """
+    sig = np.zeros(len(fine_t), dtype=np.float64)
+    if kind == 'continuous':
+        for i in range(len(t_frames) - 1):
+            mask = (fine_t >= t_frames[i]) & (fine_t < t_frames[i + 1])
+            sig[mask] = values[i]
+    elif kind == 'event':
+        for i in range(len(t_frames)):
+            fi = int(np.searchsorted(fine_t, t_frames[i], side='left'))
+            if fi < len(sig):
+                sig[fi] += values[i]
+    return sig
+
+
+def convolve_hrf(sig: np.ndarray, hrf: np.ndarray) -> np.ndarray:
+    """Full convolution with HRF, truncated back to input length."""
+    return np.convolve(sig, hrf, mode='full')[:len(sig)]
+
+
+def resample_to_tr(conv_sig: np.ndarray, fine_t: np.ndarray,
+                   tr: float, run_duration: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Sample convolved signal at TR grid: 0, TR, 2*TR, ..., up to run_duration.
+    Returns (sampled_values, tr_times).
+    """
+    tr_times = np.arange(0.0, run_duration + 1e-9, tr)
+    indices  = np.searchsorted(fine_t, tr_times, side='left')
+    indices  = np.clip(indices, 0, len(conv_sig) - 1)
+    return conv_sig[indices].astype(np.float64), tr_times
+
+
+def _zscore(v: np.ndarray) -> np.ndarray:
+    """Z-score a 1-D array. std가 0이면 zeros 반환."""
+    std = v.std()
+    if std < 1e-8:
+        return np.zeros_like(v, dtype=np.float64)
+    return ((v - v.mean()) / std).astype(np.float64)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    args   = get_args()
-    device = resolve_device(args.device)
-    print(f'Device: {device}')
+    args         = get_args()
+    device       = resolve_device(args.device)
+    file_indices = args.file_idx
+    ACTION_NAMES     = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
+    ACTION_NAMES_REG = ACTION_NAMES[1:]   # NOOP은 baseline — regressor에서 제외
+    PIXEL_TYPES  = ['ae', 'vae', 'rnd']
+    UNCT_TYPES   = ['unc_kendall', 'vote_disagree', 'zscore_std', 'zscore_human']
+    U_PIXEL_KEYS = [f'u_pixel_{pt}' for pt in PIXEL_TYPES]
+    U_QUNC_KEYS  = [f'u_q_{ut}'     for ut in UNCT_TYPES]
+    # base regressors (no pixel/uncertainty — added per-combination)
+    BASE_REGS    = (
+        [f'action_{n.lower().replace("+", "_")}' for n in ACTION_NAMES_REG] +
+        ['reward', 'terminal', 'frame_diff_mse']
+    )
+    # HRF parameters
+    HRF_DT       = 0.05    # fine grid resolution (s)
+    HRF_LEN      = 32.0    # HRF kernel length (s)
+    TR           = 1.0     # fMRI TR (s)
+    # Scan structure: 60s pre-rest + ~480s game + 60s post-rest = 600 TRs
+    PRE_REST_TRS  = 60     # TRs of silence before game onset
+    POST_REST_TRS = 60     # TRs of silence after game end
+    # regressor type classification (for HRF pipeline)
+    CONTINUOUS_REGS = ['frame_diff_mse'] + U_PIXEL_KEYS + U_QUNC_KEYS
+    EVENT_REGS      = (
+        [f'action_{n.lower().replace("+", "_")}' for n in ACTION_NAMES_REG] +
+        ['reward', 'terminal']
+    )
+    out_dir = Path(args.out_dir) if args.out_dir else Path('.')
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Load npz ──────────────────────────────────────────────────────────
+    print(f'Device: {device}')
+    print(f'File indices: {file_indices}')
+
+    # ── 1. Validate npz files ─────────────────────────────────────────────────
     npz_files = sorted(glob.glob(
         str(Path(args.data_dir) / args.subject / '*.npz')))
     if not npz_files:
         raise FileNotFoundError(f'No npz files in {args.data_dir}/{args.subject}')
-    npz_path = npz_files[args.file_idx]
-    print(f'\nLoading: {Path(npz_path).name}')
+    for fidx in file_indices:
+        if fidx < 0 or fidx >= len(npz_files):
+            raise ValueError(f'file_idx {fidx} out of range [0, {len(npz_files)-1}]')
 
-    data   = np.load(npz_path)
-    time_  = data['time'].astype(np.float32)          # (N,)
-    states = data['state']                             # (N, 4, 84, 84) uint8
-    acts   = data['action']                            # (N, 6) one-hot
-    rews   = data['reward'].astype(np.float32)         # (N,)
-    dones  = data['done'].astype(np.float32)           # (N,)
-    N      = len(time_)
-    print(f'  Frames: {N:,}  |  time: {time_[0]:.2f}s – {time_[-1]:.2f}s')
-
-    # ── 2. Basic regressors (no model needed) ────────────────────────────────
-    action_idx    = acts.argmax(axis=1).astype(np.int32)             # (N,)
-    action_change = np.concatenate([[0], (action_idx[1:] != action_idx[:-1]).astype(np.float32)])
-    # one-hot action columns
-    ACTION_NAMES  = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
-    action_onehot = (action_idx[:, None] == np.arange(6)[None, :]).astype(np.float32)  # (N, 6)
-
-    # frame-to-frame pixel MSE (last channel of state stack)
-    frames_last = states[:, -1, :, :].astype(np.float32) / 255.0    # (N, 84, 84)
-    frame_diff  = np.zeros(N, dtype=np.float32)
-    diff        = frames_last[1:] - frames_last[:-1]
-    frame_diff[1:] = (diff ** 2).mean(axis=(1, 2))
-
-    # ── 3. Load pixel novelty models ─────────────────────────────────────────
+    # ── 2. Load models once ───────────────────────────────────────────────────
     print('\nLoading pixel-novelty models...')
     ae_model  = load_ae(args.ae_path,   device)
     vae_model = load_vae(args.vae_path, device)
     rnd_model = load_rnd(args.rnd_path, device)
 
-    print('\nComputing pixel novelty...')
-    print('  AE:')
-    u_ae  = compute_pixel_novelty(ae_model,  states, args.batch_size, device)
-    print('  VAE:')
-    u_vae = compute_pixel_novelty(vae_model, states, args.batch_size, device)
-    print('  RND:')
-    u_rnd = compute_pixel_novelty(rnd_model, states, args.batch_size, device)
-
-    # free GPU memory
-    del ae_model, vae_model, rnd_model
-    if device.type in ('cuda', 'mps'):
-        torch.mps.empty_cache() if device.type == 'mps' else torch.cuda.empty_cache()
-
-    # ── 4. Load ensemble DQN ─────────────────────────────────────────────────
     print('\nLoading ensemble DQN...')
     ens_model = load_ensemble(args.ensemble_path, args.dqn_path, device)
 
-    print('Computing Q-level uncertainty...')
-    q_metrics = compute_q_uncertainty(ens_model, states, args.batch_size, device)
+    # ── 3. Process each run: compute raw frame-level regressors ──────────────
+    per_run = []   # list of (fidx, N, run_dict)
+    for fidx in file_indices:
+        npz_path = npz_files[fidx]
+        print(f'\n{"="*60}')
+        print(f'Processing file_idx={fidx}: {Path(npz_path).name}')
 
-    # ── 5. Assemble DataFrame ────────────────────────────────────────────────
-    print('\nAssembling regressor DataFrame...')
-    cols = {'time': time_}
+        data   = np.load(npz_path)
+        time_  = data['time'].astype(np.float64)
+        states = data['state']                              # (N, 4, 84, 84) uint8
+        acts   = data['action']                             # (N, 6) one-hot
+        rews   = data['reward'].astype(np.float64)
+        dones  = data['done'].astype(np.float64)
+        N      = len(time_)
+        print(f'  Frames: {N:,}  |  time: {time_[0]:.2f}s – {time_[-1]:.2f}s')
 
-    if args.intercept:
-        cols['intercept'] = np.ones(N, dtype=np.float32)
+        action_idx = acts.argmax(axis=1).astype(np.int32)
 
-    for i, name in enumerate(ACTION_NAMES):
-        cols[f'action_{name.lower().replace("+", "_")}'] = action_onehot[:, i]
-    cols['action_change'] = action_change
-    cols['reward']        = rews
-    cols['terminal']      = dones
-    cols['frame_diff_mse']= frame_diff
-    cols['u_pixel_ae']    = u_ae
-    cols['u_pixel_vae']   = u_vae
-    cols['u_pixel_rnd']   = u_rnd
-    cols.update(q_metrics)
+        # action onset: fires only at the first frame of each sustained action bout
+        onset_mask = np.zeros(N, dtype=bool)
+        onset_mask[0] = True
+        onset_mask[1:] = action_idx[1:] != action_idx[:-1]
+        action_onset_onehot = np.zeros((N, 6), dtype=np.float64)
+        action_onset_onehot[onset_mask, action_idx[onset_mask]] = 1.0
 
-    df = pd.DataFrame(cols)
+        frames_last = states[:, -1, :, :].astype(np.float64) / 255.0
+        frame_diff  = np.zeros(N, dtype=np.float64)
+        frame_diff[1:] = ((frames_last[1:] - frames_last[:-1]) ** 2).mean(axis=(1, 2))
 
-    # ── 6. Save ──────────────────────────────────────────────────────────────
-    if args.output is None:
-        out_path = Path(f'regressors_{args.subject}_f{args.file_idx}.csv')
-    else:
-        out_path = Path(args.output)
+        print('  Computing pixel novelty...')
+        u_ae  = compute_pixel_novelty(ae_model,  states, args.batch_size, device).astype(np.float64)
+        u_vae = compute_pixel_novelty(vae_model, states, args.batch_size, device).astype(np.float64)
+        u_rnd = compute_pixel_novelty(rnd_model, states, args.batch_size, device).astype(np.float64)
 
-    df.to_csv(out_path, index=False, float_format='%.6f')
-    print(f'\nSaved → {out_path}  ({len(df)} rows × {len(df.columns)} cols)')
-    print(f'Columns: {list(df.columns)}')
-    print('\nSummary statistics:')
-    print(df.describe().to_string())
+        print('  Computing Q-level uncertainty...')
+        q_metrics = compute_q_uncertainty(ens_model, states, action_idx,
+                                          args.batch_size, device)
+
+        rd = {
+            'time':           time_,
+            'reward':         rews,    # raw magnitude (e.g. +100, +200)
+            'terminal':       dones,
+            'frame_diff_mse': frame_diff,
+            'u_pixel_ae':        u_ae,
+            'u_pixel_vae':       u_vae,
+            'u_pixel_rnd':       u_rnd,
+            'u_q_unc_kendall':   q_metrics['u_q_unc_kendall'].astype(np.float64),
+            'u_q_vote_disagree': q_metrics['u_q_vote_disagree'].astype(np.float64),
+            'u_q_zscore_std':    q_metrics['u_q_zscore_std'].astype(np.float64),
+            'u_q_zscore_human':  q_metrics['u_q_zscore_human'].astype(np.float64),
+        }
+        for i, name in enumerate(ACTION_NAMES):
+            rd[f'action_{name.lower().replace("+", "_")}'] = action_onset_onehot[:, i]  # onset only; NOOP(i=0) 포함
+
+        per_run.append((fidx, N, rd))
+
+    # ── 3.5 Time interval diagnostics (frame-level) ──────────────────────────
+    print('\n' + '='*60)
+    print('Time interval diagnostics (frame-to-frame dt):')
+    for fidx, N, rd in per_run:
+        dt = np.diff(rd['time'])
+        print(f'  run file_idx={fidx}  N={N:,}')
+        print(f'    time range : {rd["time"][0]:.4f}s – {rd["time"][-1]:.4f}s')
+        print(f'    dt  mean   : {dt.mean():.6f}s')
+        print(f'    dt  std    : {dt.std():.6f}s')
+        print(f'    dt  min    : {dt.min():.6f}s')
+        print(f'    dt  max    : {dt.max():.6f}s')
+        # histogram of dt rounded to 3 decimals
+        vals, counts = np.unique(dt.round(3), return_counts=True)
+        top_n = min(5, len(vals))
+        top_idx = np.argsort(-counts)[:top_n]
+        top_str = '  '.join(f'{vals[i]:.3f}s×{counts[i]}' for i in top_idx)
+        print(f'    dt  top-{top_n} : {top_str}')
+    print('='*60)
+
+    # ── 3.7 HRF convolution + TR resampling (full scan, per run) ────────────
+    # 전략:
+    #   - game time을 full-scan 좌표계로 shift (+PRE_REST_TRS * TR)
+    #   - fine_t를 full scan + HRF tail 길이로 설정
+    #   - continuous: game 종료 후 fine_t 구간은 명시적으로 0 (piecewise holdover 방지)
+    #   - event: 자연스럽게 game 구간에만 impulse 존재
+    #   - HRF conv + TR sampling → pre-rest 구간은 0, game 구간은 신호,
+    #     post-rest 구간은 game 마지막 event의 HRF spillover 포함 (올바른 처리)
+    #   - z-score는 600TR 전체 기준
+    print('\nApplying HRF convolution and TR resampling...')
+    hrf = spm_hrf(dt=HRF_DT, t_end=HRF_LEN)
+
+    per_run_tr = []
+    for fidx, N, rd in per_run:
+        t_game  = rd['time'] - rd['time'][0]   # zero-aligned game time (s)
+        run_dur = float(t_game[-1])
+
+        # Number of TRs in game window: 0, TR, 2TR, ..., floor(run_dur)
+        N_game   = len(np.arange(0.0, run_dur + 1e-9, TR))
+        N_tr     = PRE_REST_TRS + N_game + POST_REST_TRS
+        scan_dur = (N_tr - 1) * TR   # last TR sample time
+
+        # Shift game events into full-scan time (game starts at PRE_REST_TRS * TR)
+        t_full = t_game + PRE_REST_TRS * TR
+
+        # Fine grid covering full scan + HRF tail
+        fine_t = np.arange(0.0, scan_dur + HRF_LEN + HRF_DT, HRF_DT)
+
+        rd_tr = {}
+        for key in CONTINUOUS_REGS:
+            # mean-center over game frames only (rd[key] contains only game frames)
+            vals = rd[key] - rd[key].mean()
+            sig  = build_fine_regressor(t_full, vals, fine_t, kind='continuous')
+            conv = convolve_hrf(sig, hrf)
+            sampled, tr_t = resample_to_tr(conv, fine_t, TR, scan_dur)
+            rd_tr[key]    = _zscore(sampled)
+
+        for key in EVENT_REGS:
+            sig           = build_fine_regressor(t_full, rd[key], fine_t, kind='event')
+            conv          = convolve_hrf(sig, hrf)
+            sampled, tr_t = resample_to_tr(conv, fine_t, TR, scan_dur)
+            rd_tr[key]    = _zscore(sampled)
+
+        rd_tr['time_tr'] = tr_t
+        print(f'  file_idx={fidx}: {N:,} frames → {N_game} game TRs '
+              f'+ {PRE_REST_TRS}+{POST_REST_TRS} rest = {N_tr} TRs')
+        per_run_tr.append((fidx, N_tr, rd_tr))
+
+    # ── 4. Build per-run MAT files (36 total: n_runs × n_pixel × n_unc) ─────────
+    saved_mats = []
+    for fidx, N_tr, rd_tr in per_run_tr:
+        for pt in PIXEL_TYPES:
+            for ut in UNCT_TYPES:
+                pixel_key = f'u_pixel_{pt}'
+                unc_key   = f'u_q_{ut}'
+
+                col_names  = []
+                col_arrays = []
+                for reg in BASE_REGS + [pixel_key, unc_key]:
+                    col_names.append(reg)
+                    col_arrays.append(rd_tr[reg])
+
+                R = np.column_stack(col_arrays)
+
+                mat_path = out_dir / f'regressors_{args.subject}_f{fidx}_{pt}_{ut}.mat'
+                scipy.io.savemat(str(mat_path), {
+                    'R':        R,
+                    'names':    np.array(col_names, dtype=object),
+                    'time':     rd_tr['time_tr'],
+                    'file_idx': np.int32(fidx),
+                })
+                saved_mats.append(mat_path)
+                print(f'Saved → {mat_path}  ({N_tr} TRs × {R.shape[1]} cols)')
+
+    # ── 5. Save CSV (concatenated, non-block, all regressors) ─────────────────
+    csv_rows = []
+    for fidx, N, rd in per_run_tr:
+        row_dict = {'run_idx': np.full(N, fidx, dtype=np.int32)}
+        row_dict['time']   = rd['time_tr']
+        row_dict['reward'] = rd['reward']
+        row_dict['terminal']       = rd['terminal']
+        row_dict['frame_diff_mse'] = rd['frame_diff_mse']
+        for name in ACTION_NAMES_REG:  # NOOP 제외 (baseline)
+            row_dict[f'action_{name.lower().replace("+", "_")}'] = rd[f'action_{name.lower().replace("+", "_")}']
+        for key in U_PIXEL_KEYS + U_QUNC_KEYS:
+            row_dict[key] = rd[key]
+        csv_rows.append(pd.DataFrame(row_dict))
+
+    csv_df   = pd.concat(csv_rows, ignore_index=True)
+    fidx_str = '_'.join(str(i) for i in file_indices)
+    csv_path = out_dir / f'regressors_{args.subject}_f{fidx_str}.csv'
+    csv_df.to_csv(csv_path, index=False)
+    print(f'\nSaved CSV → {csv_path}')
+
+    # ── 6. Correlation matrix visualization ───────────────────────────────────
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    REG_ORDER = BASE_REGS + U_PIXEL_KEYS + U_QUNC_KEYS
+    SHORT = {
+        'action_fire':       'fire',
+        'action_right':      'right',
+        'action_left':       'left',
+        'action_right_fire': 'right+fire',
+        'action_left_fire':  'left+fire',
+        'reward':            'reward',
+        'terminal':          'terminal',
+        'frame_diff_mse':    'frame_diff',
+        'u_pixel_ae':        'pix_ae',
+        'u_pixel_vae':       'pix_vae',
+        'u_pixel_rnd':       'pix_rnd',
+        'u_q_unc_kendall':   'q_kendall',
+        'u_q_vote_disagree': 'q_vote',
+        'u_q_zscore_std':    'q_zstd',
+        'u_q_zscore_human':  'q_zhuman',
+    }
+    labels = [SHORT[k] for k in REG_ORDER]
+    n_regs = len(REG_ORDER)
+
+    print('\nSaving regressor correlation matrices...')
+    for fidx, N_tr, rd_tr in per_run_tr:
+        mat  = np.column_stack([rd_tr[k] for k in REG_ORDER])
+        corr = np.corrcoef(mat.T)
+
+        sz  = max(8, n_regs * 0.7 + 1)
+        fig, ax = plt.subplots(figsize=(sz, sz))
+        im = ax.imshow(corr, vmin=-1, vmax=1, cmap='RdBu_r', aspect='auto')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_xticks(range(n_regs))
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+        ax.set_yticks(range(n_regs))
+        ax.set_yticklabels(labels, fontsize=8)
+        for i in range(n_regs):
+            for j in range(n_regs):
+                ax.text(j, i, f'{corr[i, j]:.2f}', ha='center', va='center',
+                        fontsize=6,
+                        color='white' if abs(corr[i, j]) > 0.6 else 'black')
+        ax.set_title(f'{args.subject}  |  run f{fidx} — Regressor Correlation Matrix')
+        fig.tight_layout()
+        png_path = out_dir / f'corr_{args.subject}_f{fidx}.png'
+        fig.savefig(str(png_path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'  Saved → {png_path}')
+
+    # ── 7. Summary ────────────────────────────────────────────────────────────
+    n_runs = len(file_indices)
+    n_cols = len(BASE_REGS) + 2   # base regs + pixel + unc (no run constant)
+    n_trs  = [N for _, N, _ in per_run_tr]
+    print(f'\nTotal MAT files : {len(saved_mats)}  ({n_runs} runs × {len(PIXEL_TYPES)} pixel × {len(UNCT_TYPES)} unc)')
+    print(f'  Per-run TRs     : {n_trs}')
+    print(f'  Cols per MAT    : {n_cols}  ({len(BASE_REGS)} base + 1 pixel + 1 unc, no run constant)')
+    print(f'  HRF             : SPM canonical, {HRF_LEN:.0f}s, dt={HRF_DT}s → TR={TR}s, per-run z-score')
+    print(f'\nMAT file naming: regressors_{{subject}}_f{{fidx}}_{{pixel}}_{{unc}}.mat')
 
 
 if __name__ == '__main__':

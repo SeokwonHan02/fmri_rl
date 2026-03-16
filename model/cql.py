@@ -153,14 +153,12 @@ def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_fr
         total_q_value += q_values.mean().item() * state.size(0)
         total_samples += state.size(0)
 
-    avg_td_loss = total_td_loss / total_samples
-    avg_cql_fire_loss = total_cql_fire_loss / total_samples
-    avg_cql_move_loss = total_cql_move_loss / total_samples
-    avg_cql_loss = total_cql_loss / total_samples
-    avg_total_loss = total_loss_sum / total_samples
-    avg_q_value = total_q_value / total_samples
+    avg_td_loss    = total_td_loss   / total_samples
+    avg_cql_loss   = total_cql_loss  / total_samples
+    avg_total_loss = total_loss_sum  / total_samples
+    avg_q_value    = total_q_value   / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_cql_fire_loss, avg_cql_move_loss
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
 
 
 def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None,
@@ -256,14 +254,12 @@ def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weig
             total_correct      += (action_pred == action_idx).sum().item()
             total_samples      += state.size(0)
 
-    avg_td_loss      = total_td_loss      / total_samples
-    avg_cql_fire_loss = total_cql_fire_loss / total_samples
-    avg_cql_move_loss = total_cql_move_loss / total_samples
-    avg_cql_loss     = total_cql_loss     / total_samples
-    avg_total_loss   = total_loss_sum     / total_samples
-    avg_q_value      = total_q_value      / total_samples
-    avg_ce_loss      = total_ce_loss      / total_samples
-    avg_wce_loss     = total_wce_loss     / total_samples
-    action_accuracy  = total_correct      / total_samples
+    avg_td_loss     = total_td_loss    / total_samples
+    avg_cql_loss    = total_cql_loss   / total_samples
+    avg_total_loss  = total_loss_sum   / total_samples
+    avg_q_value     = total_q_value    / total_samples
+    avg_ce_loss     = total_ce_loss    / total_samples
+    avg_wce_loss    = total_wce_loss   / total_samples
+    action_accuracy = total_correct    / total_samples
 
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy, avg_cql_fire_loss, avg_cql_move_loss
+    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy

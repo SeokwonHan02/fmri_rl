@@ -186,6 +186,28 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
     return train_loader, val_loader, test_loader
 
 
+def create_all_data_dataloader(data_dir, batch_size, subject, num_workers=4):
+    """
+    Load all npz files for a subject and return a single dataloader.
+    Used for training and validating on the full dataset (no split).
+    """
+    subject_dir = Path(data_dir) / subject
+    if not subject_dir.exists():
+        raise ValueError(f"Subject directory not found: {subject_dir}")
+
+    npz_files = sorted(glob.glob(str(subject_dir / '*.npz')))
+    if len(npz_files) == 0:
+        raise ValueError(f"No npz files found in {subject_dir}")
+
+    print(f"\nLoading all data (no split): {len(npz_files)} files from {subject_dir}")
+
+    use_pin_memory = torch.cuda.is_available()
+    dataset = OfflineRLDataset(npz_files=npz_files)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        num_workers=num_workers, pin_memory=use_pin_memory)
+    return loader
+
+
 if __name__ == '__main__':
     # Test dataset
     data_dir = '/Users/seokwon/research/fMRI_RL/processed_data/game_2_all'

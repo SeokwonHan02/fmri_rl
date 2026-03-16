@@ -23,6 +23,8 @@ def get_args():
                         help='Index of validation file (0-based)')
     parser.add_argument('--test-file-idx', type=int, default=10,
                         help='Index of test file (0-based)')
+    parser.add_argument('--all-data', action='store_true', default=False,
+                        help='Use all files for both training and validation (no train/val/test split)')
 
     # Model
     parser.add_argument('--dqn-path', type=str,
