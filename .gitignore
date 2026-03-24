@@ -18,6 +18,9 @@ ensemble_visualize.py
 ensemble_vis/
 analyze_uncertainty_corr.py
 mat/
+mat_reward/
+mat_pca_5/
+compute_glm_*.py
 *.csv
 *.pth
 *.png

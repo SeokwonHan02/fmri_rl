@@ -18,24 +18,23 @@ Q-level uncertainty (4종):
 HRF 처리:
   SPM canonical HRF (double-gamma, 32s), dt=0.05s fine grid
   event regressors   : impulse at frame time → HRF conv → TR 샘플링 → z-score
-  continuous regressors: piecewise-constant → HRF conv → TR 샘플링 → z-score
-  TR = 1.0s, 스캔 구조: 60s pre-rest + ~480s game + 60s post-rest = 600 TRs
-  게임 구간 regressors는 HRF conv 후 z-score; 전/후 휴식 구간은 0-패딩
+  continuous regressors: mean-center over game frames → piecewise-constant → HRF conv → TR 샘플링 → z-score
+  TR = 1.0s, game 구간만 처리 (~480 TRs); pre/post rest 구간 제외
 
 출력 MAT 파일 (36개, run × 조합별):
   regressors_{subject}_f{fidx}_{pixel}_{unc}.mat
-  R 행 수: ~600 (pre60 + game TRs + post60), 열 구조:
-    action_fire             HRF-convolved onset event × 5  (5 cols)
-    action_right            (NOOP은 baseline으로 제외; onset = action bout 시작 프레임)
-    action_left
-    action_right_fire
-    action_left_fire
+  R 행 수: ~480 (game TRs only), 열 구조:
+    action_direction        HRF-convolved onset event × 2  (2 cols)
+    action_fire             (NOOP은 baseline으로 제외; onset = action bout 시작 프레임)
+                            direction: RIGHT, LEFT, RIGHT+FIRE, LEFT+FIRE (방향키 눌림)
+                            fire:      FIRE, RIGHT+FIRE, LEFT+FIRE (fire 버튼 눌림)
+                            RIGHT+FIRE / LEFT+FIRE는 두 regressor 모두에 기여
     reward                  HRF-convolved event (raw magnitude)  (1 col)
     terminal                HRF-convolved event            (1 col)
     frame_diff_mse          HRF-convolved continuous       (1 col)
     u_pixel_{type}          HRF-convolved continuous       (1 col)
     u_q_{type}              HRF-convolved continuous       (1 col)
-  모든 regressor는 run별 z-score 정규화됨 (HRF 이후, 600TR 전체 기준)
+  모든 regressor는 run별 z-score 정규화됨 (HRF 이후, game TR 기준)
   MAT 메타데이터 (GLM regressor 아님):
     time      TR 시간축 (0, 1, ..., N_tr-1)
     file_idx  npz 파일 인덱스 (scalar)
@@ -87,7 +86,7 @@ def get_args():
     # Options
     p.add_argument('--batch_size',  type=int, default=256)
     p.add_argument('--device',      default='auto')
-    p.add_argument('--out_dir',     default=str(_ROOT / 'mat'))
+    p.add_argument('--out_dir',     default=str(_ROOT / 'mat/sub1_run8910'))
 
     return p.parse_args()
 
@@ -338,30 +337,28 @@ def main():
     args         = get_args()
     device       = resolve_device(args.device)
     file_indices = args.file_idx
-    ACTION_NAMES     = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHT+FIRE', 'LEFT+FIRE']
-    ACTION_NAMES_REG = ACTION_NAMES[1:]   # NOOP은 baseline — regressor에서 제외
+
+    # action 분류 (독립 버튼 개념):
+    #   direction(왼손): RIGHT(2), LEFT(3), RIGHT+FIRE(4), LEFT+FIRE(5)
+    #   fire(오른손):    FIRE(1),  RIGHT+FIRE(4), LEFT+FIRE(5)
+    #   NOOP (idx=0) 은 baseline 제외
+    # ACTION index: 0=NOOP, 1=FIRE, 2=RIGHT, 3=LEFT, 4=RIGHT+FIRE, 5=LEFT+FIRE
+    ACTION_ONSET_REGS    = ['action_direction', 'action_fire']
     PIXEL_TYPES  = ['ae', 'vae', 'rnd']
     UNCT_TYPES   = ['unc_kendall', 'vote_disagree', 'zscore_std', 'zscore_human']
     U_PIXEL_KEYS = [f'u_pixel_{pt}' for pt in PIXEL_TYPES]
     U_QUNC_KEYS  = [f'u_q_{ut}'     for ut in UNCT_TYPES]
+
     # base regressors (no pixel/uncertainty — added per-combination)
-    BASE_REGS    = (
-        [f'action_{n.lower().replace("+", "_")}' for n in ACTION_NAMES_REG] +
-        ['reward', 'terminal', 'frame_diff_mse']
-    )
+    BASE_REGS    = ACTION_ONSET_REGS
     # HRF parameters
     HRF_DT       = 0.05    # fine grid resolution (s)
     HRF_LEN      = 32.0    # HRF kernel length (s)
     TR           = 1.0     # fMRI TR (s)
-    # Scan structure: 60s pre-rest + ~480s game + 60s post-rest = 600 TRs
-    PRE_REST_TRS  = 60     # TRs of silence before game onset
-    POST_REST_TRS = 60     # TRs of silence after game end
+
     # regressor type classification (for HRF pipeline)
-    CONTINUOUS_REGS = ['frame_diff_mse'] + U_PIXEL_KEYS + U_QUNC_KEYS
-    EVENT_REGS      = (
-        [f'action_{n.lower().replace("+", "_")}' for n in ACTION_NAMES_REG] +
-        ['reward', 'terminal']
-    )
+    CONTINUOUS_REGS = U_PIXEL_KEYS + U_QUNC_KEYS
+    EVENT_REGS      = ACTION_ONSET_REGS
     out_dir = Path(args.out_dir) if args.out_dir else Path('.')
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -397,23 +394,25 @@ def main():
         time_  = data['time'].astype(np.float64)
         states = data['state']                              # (N, 4, 84, 84) uint8
         acts   = data['action']                             # (N, 6) one-hot
-        rews   = data['reward'].astype(np.float64)
-        dones  = data['done'].astype(np.float64)
         N      = len(time_)
         print(f'  Frames: {N:,}  |  time: {time_[0]:.2f}s – {time_[-1]:.2f}s')
 
         action_idx = acts.argmax(axis=1).astype(np.int32)
 
-        # action onset: fires only at the first frame of each sustained action bout
-        onset_mask = np.zeros(N, dtype=bool)
-        onset_mask[0] = True
-        onset_mask[1:] = action_idx[1:] != action_idx[:-1]
-        action_onset_onehot = np.zeros((N, 6), dtype=np.float64)
-        action_onset_onehot[onset_mask, action_idx[onset_mask]] = 1.0
+        # 버튼별 binary 시계열
+        # direction(왼손): RIGHT(2), LEFT(3), RIGHT+FIRE(4), LEFT+FIRE(5)
+        # fire(오른손):    FIRE(1),  RIGHT+FIRE(4), LEFT+FIRE(5)
+        # NOOP(0) = baseline
+        dir_pressed  = np.isin(action_idx, [2, 3, 4, 5]).astype(np.float64)
+        fire_pressed = np.isin(action_idx, [1, 4, 5]).astype(np.float64)
 
-        frames_last = states[:, -1, :, :].astype(np.float64) / 255.0
-        frame_diff  = np.zeros(N, dtype=np.float64)
-        frame_diff[1:] = ((frames_last[1:] - frames_last[:-1]) ** 2).mean(axis=(1, 2))
+        # 버튼별 onset: 각 버튼이 0→1로 눌리는 순간만 (FIRE→RIGHT+FIRE 시 fire onset 없음)
+        dir_onset        = np.zeros(N, dtype=np.float64)
+        fire_onset       = np.zeros(N, dtype=np.float64)
+        dir_onset[0]     = dir_pressed[0]
+        fire_onset[0]    = fire_pressed[0]
+        dir_onset[1:]    = np.maximum(dir_pressed[1:]  - dir_pressed[:-1],  0)
+        fire_onset[1:]   = np.maximum(fire_pressed[1:] - fire_pressed[:-1], 0)
 
         print('  Computing pixel novelty...')
         u_ae  = compute_pixel_novelty(ae_model,  states, args.batch_size, device).astype(np.float64)
@@ -425,10 +424,9 @@ def main():
                                           args.batch_size, device)
 
         rd = {
-            'time':           time_,
-            'reward':         rews,    # raw magnitude (e.g. +100, +200)
-            'terminal':       dones,
-            'frame_diff_mse': frame_diff,
+            'time':              time_,
+            'action_direction':  dir_onset,
+            'action_fire':       fire_onset,
             'u_pixel_ae':        u_ae,
             'u_pixel_vae':       u_vae,
             'u_pixel_rnd':       u_rnd,
@@ -437,8 +435,6 @@ def main():
             'u_q_zscore_std':    q_metrics['u_q_zscore_std'].astype(np.float64),
             'u_q_zscore_human':  q_metrics['u_q_zscore_human'].astype(np.float64),
         }
-        for i, name in enumerate(ACTION_NAMES):
-            rd[f'action_{name.lower().replace("+", "_")}'] = action_onset_onehot[:, i]  # onset only; NOOP(i=0) 포함
 
         per_run.append((fidx, N, rd))
 
@@ -461,52 +457,35 @@ def main():
         print(f'    dt  top-{top_n} : {top_str}')
     print('='*60)
 
-    # ── 3.7 HRF convolution + TR resampling (full scan, per run) ────────────
-    # 전략:
-    #   - game time을 full-scan 좌표계로 shift (+PRE_REST_TRS * TR)
-    #   - fine_t를 full scan + HRF tail 길이로 설정
-    #   - continuous: game 종료 후 fine_t 구간은 명시적으로 0 (piecewise holdover 방지)
-    #   - event: 자연스럽게 game 구간에만 impulse 존재
-    #   - HRF conv + TR sampling → pre-rest 구간은 0, game 구간은 신호,
-    #     post-rest 구간은 game 마지막 event의 HRF spillover 포함 (올바른 처리)
-    #   - z-score는 600TR 전체 기준
+    # ── 3.7 HRF convolution + TR resampling (game-only, per run) ─────────────
+    # continuous: mean-center over game frames → piecewise-const → HRF conv → TR resample → z-score
+    # event:      impulse at frame time (no mean-center) → HRF conv → TR resample → z-score
     print('\nApplying HRF convolution and TR resampling...')
     hrf = spm_hrf(dt=HRF_DT, t_end=HRF_LEN)
 
     per_run_tr = []
     for fidx, N, rd in per_run:
-        t_game  = rd['time'] - rd['time'][0]   # zero-aligned game time (s)
-        run_dur = float(t_game[-1])
-
-        # Number of TRs in game window: 0, TR, 2TR, ..., floor(run_dur)
-        N_game   = len(np.arange(0.0, run_dur + 1e-9, TR))
-        N_tr     = PRE_REST_TRS + N_game + POST_REST_TRS
-        scan_dur = (N_tr - 1) * TR   # last TR sample time
-
-        # Shift game events into full-scan time (game starts at PRE_REST_TRS * TR)
-        t_full = t_game + PRE_REST_TRS * TR
-
-        # Fine grid covering full scan + HRF tail
-        fine_t = np.arange(0.0, scan_dur + HRF_LEN + HRF_DT, HRF_DT)
+        t       = rd['time'] - rd['time'][0]   # zero-aligned game time (s)
+        run_dur = float(t[-1])
+        fine_t  = np.arange(0.0, run_dur + HRF_LEN + HRF_DT, HRF_DT)
 
         rd_tr = {}
         for key in CONTINUOUS_REGS:
-            # mean-center over game frames only (rd[key] contains only game frames)
-            vals = rd[key] - rd[key].mean()
-            sig  = build_fine_regressor(t_full, vals, fine_t, kind='continuous')
-            conv = convolve_hrf(sig, hrf)
-            sampled, tr_t = resample_to_tr(conv, fine_t, TR, scan_dur)
+            vals          = rd[key] - rd[key].mean()   # mean-center over game frames
+            sig           = build_fine_regressor(t, vals, fine_t, kind='continuous')
+            conv          = convolve_hrf(sig, hrf)
+            sampled, tr_t = resample_to_tr(conv, fine_t, TR, run_dur)
             rd_tr[key]    = _zscore(sampled)
 
         for key in EVENT_REGS:
-            sig           = build_fine_regressor(t_full, rd[key], fine_t, kind='event')
+            sig           = build_fine_regressor(t, rd[key], fine_t, kind='event')
             conv          = convolve_hrf(sig, hrf)
-            sampled, tr_t = resample_to_tr(conv, fine_t, TR, scan_dur)
-            rd_tr[key]    = _zscore(sampled)
+            sampled, tr_t = resample_to_tr(conv, fine_t, TR, run_dur)
+            rd_tr[key]    = sampled   # no z-score; SPM handles scaling
 
         rd_tr['time_tr'] = tr_t
-        print(f'  file_idx={fidx}: {N:,} frames → {N_game} game TRs '
-              f'+ {PRE_REST_TRS}+{POST_REST_TRS} rest = {N_tr} TRs')
+        N_tr = len(tr_t)
+        print(f'  file_idx={fidx}: {N:,} frames → {N_tr} game TRs  (run_dur={run_dur:.1f}s)')
         per_run_tr.append((fidx, N_tr, rd_tr))
 
     # ── 4. Build per-run MAT files (36 total: n_runs × n_pixel × n_unc) ─────────
@@ -540,11 +519,8 @@ def main():
     for fidx, N, rd in per_run_tr:
         row_dict = {'run_idx': np.full(N, fidx, dtype=np.int32)}
         row_dict['time']   = rd['time_tr']
-        row_dict['reward'] = rd['reward']
-        row_dict['terminal']       = rd['terminal']
-        row_dict['frame_diff_mse'] = rd['frame_diff_mse']
-        for name in ACTION_NAMES_REG:  # NOOP 제외 (baseline)
-            row_dict[f'action_{name.lower().replace("+", "_")}'] = rd[f'action_{name.lower().replace("+", "_")}']
+        for reg in ACTION_ONSET_REGS:
+            row_dict[reg] = rd[reg]
         for key in U_PIXEL_KEYS + U_QUNC_KEYS:
             row_dict[key] = rd[key]
         csv_rows.append(pd.DataFrame(row_dict))
@@ -555,21 +531,15 @@ def main():
     csv_df.to_csv(csv_path, index=False)
     print(f'\nSaved CSV → {csv_path}')
 
-    # ── 6. Correlation matrix visualization ───────────────────────────────────
+    # ── 5.5 Regressor time-series visualization ───────────────────────────────
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     REG_ORDER = BASE_REGS + U_PIXEL_KEYS + U_QUNC_KEYS
     SHORT = {
-        'action_fire':       'fire',
-        'action_right':      'right',
-        'action_left':       'left',
-        'action_right_fire': 'right+fire',
-        'action_left_fire':  'left+fire',
-        'reward':            'reward',
-        'terminal':          'terminal',
-        'frame_diff_mse':    'frame_diff',
+        'action_direction':  'dir_onset',
+        'action_fire':       'fire_onset',
         'u_pixel_ae':        'pix_ae',
         'u_pixel_vae':       'pix_vae',
         'u_pixel_rnd':       'pix_rnd',
@@ -578,6 +548,27 @@ def main():
         'u_q_zscore_std':    'q_zstd',
         'u_q_zscore_human':  'q_zhuman',
     }
+
+    print('\nSaving regressor time-series plots...')
+    for fidx, N_tr, rd_tr in per_run_tr:
+        n_regs = len(REG_ORDER)
+        fig, axes = plt.subplots(n_regs, 1, figsize=(16, n_regs * 1.6), sharex=True)
+        t_axis = rd_tr['time_tr']
+        for ax, key in zip(axes, REG_ORDER):
+            ax.plot(t_axis, rd_tr[key], linewidth=0.7, color='steelblue')
+            ax.set_ylabel(SHORT[key], fontsize=7, rotation=0, labelpad=60, va='center')
+            ax.tick_params(labelsize=6)
+            ax.spines[['top', 'right']].set_visible(False)
+        axes[-1].set_xlabel('Time (s)', fontsize=8)
+        fig.suptitle(f'{args.subject}  |  run f{fidx} — Regressors (post-HRF, pre-MAT)',
+                     fontsize=10, y=1.001)
+        fig.tight_layout()
+        ts_path = out_dir / f'timeseries_{args.subject}_f{fidx}.png'
+        fig.savefig(str(ts_path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'  Saved → {ts_path}')
+
+    # ── 6. Correlation matrix visualization ───────────────────────────────────
     labels = [SHORT[k] for k in REG_ORDER]
     n_regs = len(REG_ORDER)
 
@@ -612,8 +603,10 @@ def main():
     n_trs  = [N for _, N, _ in per_run_tr]
     print(f'\nTotal MAT files : {len(saved_mats)}  ({n_runs} runs × {len(PIXEL_TYPES)} pixel × {len(UNCT_TYPES)} unc)')
     print(f'  Per-run TRs     : {n_trs}')
-    print(f'  Cols per MAT    : {n_cols}  ({len(BASE_REGS)} base + 1 pixel + 1 unc, no run constant)')
-    print(f'  HRF             : SPM canonical, {HRF_LEN:.0f}s, dt={HRF_DT}s → TR={TR}s, per-run z-score')
+    print(f'  Cols per MAT    : {n_cols}  ({len(BASE_REGS)} base + 1 pixel + 1 unc)')
+    print(f'  HRF             : SPM canonical, {HRF_LEN:.0f}s, dt={HRF_DT}s → TR={TR}s')
+    print(f'  Continuous regs : mean-centered over game frames before HRF conv')
+    print(f'  Z-score         : game-only TR basis, per run')
     print(f'\nMAT file naming: regressors_{{subject}}_f{{fidx}}_{{pixel}}_{{unc}}.mat')
 
 
