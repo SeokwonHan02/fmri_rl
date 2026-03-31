@@ -5,8 +5,8 @@ def get_args():
 
     # Algorithm selection
     parser.add_argument('--algo', type=str, default='bc',
-                        choices=['bc', 'bcq', 'cql', 'prob_cql', 'ensemble_dqn'],
-                        help='Algorithm to use: bc, bcq, cql, prob_cql, or ensemble_dqn')
+                        choices=['bc', 'bcq', 'cql', 'prob_cql', 'ensemble_dqn', 'iql'],
+                        help='Algorithm to use: bc, bcq, cql, prob_cql, ensemble_dqn, or iql')
 
     # Data
     parser.add_argument('--data-dir', type=str,
@@ -59,6 +59,14 @@ def get_args():
                              '(1.0 = all samples per head, 0.5 = half the batch per head)')
     parser.add_argument('--ce-lambda', type=float, default=1.0,
                         help='Weight for CE regularization loss in EnsembleDQN (total = td + λ * ce)')
+
+    # IQL specific
+    parser.add_argument('--iql-tau', type=float, default=0.7,
+                        help='Expectile parameter for IQL value loss (0.5 < tau < 1)')
+    parser.add_argument('--iql-beta', type=float, default=3.0,
+                        help='Temperature for IQL advantage-weighted actor')
+    parser.add_argument('--iql-max-weight', type=float, default=100.0,
+                        help='Max clamp for exp(beta * adv) in IQL actor')
 
     # BCQ specific
     parser.add_argument('--bcq-threshold', type=float, default=0.3,

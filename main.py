@@ -12,10 +12,11 @@ from model import (
     BehaviorCloning, train_bc, val_bc,
     BCQ, train_bcq, val_bcq,
     CQL, train_cql, val_cql,
+    IQL, train_iql, val_iql,
     ProbCQL, train_prob_cql, val_prob_cql,
     EnsembleDQN, train_ensemble_dqn, val_ensemble_dqn,
 )
-from fMRI_RL.discorl import evaluate_agent
+from eval import evaluate_agent
 
 
 def safe_save(obj, path: Path):
@@ -208,17 +209,29 @@ def main():
         val_fn = val_ensemble_dqn
         print(f"EnsembleDQN: {args.num_heads} heads, mask_prob={args.mask_prob}")
 
+    elif args.algo == 'iql':
+        model = IQL(cnn, action_dim=6, tau=args.iql_tau, beta=args.iql_beta,
+                    max_weight=args.iql_max_weight, target_update_freq=args.target_update_freq)
+        print(f"IQL: τ={args.iql_tau}, β={args.iql_beta}, max_weight={args.iql_max_weight}")
+
     else:
         raise ValueError(f"Unknown algorithm: {args.algo}")
 
     model = model.to(device)
 
     # Optimizer (encoder is always frozen, only optimize trainable parameters)
-    optimizer = optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr
-    )
-    print(f"Optimizer: LR={args.lr:.2e} (encoder frozen)")
+    if args.algo == 'iql':
+        q_optimizer     = optim.Adam(model.q_network.parameters(), lr=args.lr)
+        v_optimizer     = optim.Adam(model.v_network.parameters(), lr=args.lr)
+        actor_optimizer = optim.Adam(model.actor.parameters(),     lr=args.lr)
+        optimizer = None  # not used for IQL
+        print(f"IQL Optimizers: 3× Adam LR={args.lr:.2e} (q, v, actor)")
+    else:
+        optimizer = optim.Adam(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.lr
+        )
+        print(f"Optimizer: LR={args.lr:.2e} (encoder frozen)")
 
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
@@ -407,6 +420,50 @@ def main():
             # Save heads only (CNN is always the same pretrained encoder)
             if epoch % args.save_interval == 0:
                 safe_save(model.heads.state_dict(), save_dir / f'epoch_{epoch}.pth')
+                tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
+
+        elif args.algo == 'iql':
+            (train_q_loss, train_v_loss, train_actor_loss,
+             train_avg_q, train_avg_v, train_avg_adv, train_avg_w) = train_iql(
+                model, train_loader, q_optimizer, v_optimizer, actor_optimizer,
+                device, args.gamma, args.target_update_freq, args.reward_scale
+            )
+
+            if args.all_data:
+                tqdm.write(
+                    f"Epoch {epoch}/{args.epochs}\n"
+                    f"  Train - Q: {train_q_loss:.4f}, V: {train_v_loss:.4f}, "
+                    f"Actor: {train_actor_loss:.4f}, Avg Q: {train_avg_q:.2f}, "
+                    f"Avg V: {train_avg_v:.2f}, Adv: {train_avg_adv:.2f}, W: {train_avg_w:.2f}"
+                )
+            else:
+                (val_q_loss, val_v_loss, val_actor_loss,
+                 val_avg_q, val_avg_v, val_avg_adv, val_avg_w,
+                 val_ce, val_wce, val_acc) = val_iql(
+                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                )
+                (test_q_loss, test_v_loss, test_actor_loss,
+                 test_avg_q, test_avg_v, test_avg_adv, test_avg_w,
+                 test_ce, test_wce, test_acc) = val_iql(
+                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                )
+                tqdm.write(
+                    f"Epoch {epoch}/{args.epochs}\n"
+                    f"  Train - Q: {train_q_loss:.4f}, V: {train_v_loss:.4f}, "
+                    f"Actor: {train_actor_loss:.4f}, Avg Q: {train_avg_q:.2f}, "
+                    f"Avg V: {train_avg_v:.2f}, Adv: {train_avg_adv:.2f}, W: {train_avg_w:.2f}\n"
+                    f"  Val   - Q: {val_q_loss:.4f}, V: {val_v_loss:.4f}, "
+                    f"Actor: {val_actor_loss:.4f}, Avg Q: {val_avg_q:.2f}, "
+                    f"Avg V: {val_avg_v:.2f}, Adv: {val_avg_adv:.2f}, W: {val_avg_w:.2f}\n"
+                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
+                    f"  Test  - Q: {test_q_loss:.4f}, V: {test_v_loss:.4f}, "
+                    f"Actor: {test_actor_loss:.4f}, Avg Q: {test_avg_q:.2f}, "
+                    f"Avg V: {test_avg_v:.2f}, Adv: {test_avg_adv:.2f}, W: {test_avg_w:.2f}\n"
+                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                )
+
+            if epoch % args.save_interval == 0:
+                safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')
                 tqdm.write(f"  ✓ Saved model: epoch_{epoch}.pth")
 
         # ===== EVALUATION =====
