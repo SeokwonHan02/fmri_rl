@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-from .bc import action_to_fire_move
 
 class CQL(nn.Module):
     """
@@ -60,206 +59,136 @@ class CQL(nn.Module):
         self.q_network_target.load_state_dict(self.q_network.state_dict())
 
 
-def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1,
-              fire_cql_weight=1.0, move_cql_weight=1.0):
+def train_cql(model, dataloader, optimizer, device, gamma=0.99, target_update_freq=100, reward_scale=0.1):
     model.train()
-    total_td_loss = 0
-    total_cql_fire_loss = 0
-    total_cql_move_loss = 0
+    total_td_loss  = 0
     total_cql_loss = 0
     total_loss_sum = 0
-    total_q_value = 0
-    total_samples = 0
+    total_q_value  = 0
+    total_samples  = 0
 
     for batch in dataloader:
         model.training_step += 1
-        state = batch['state'].to(device).float() / 255.0
-        action = batch['action'].to(device)
-        reward = batch['reward'].to(device).float() * reward_scale
+        state      = batch['state'].to(device).float() / 255.0
+        action     = batch['action'].to(device)
+        reward     = batch['reward'].to(device).float() * reward_scale
         next_state = batch['next_state'].to(device).float() / 255.0
-        done = batch['done'].to(device).float()
+        done       = batch['done'].to(device).float()
 
-        # Ensure all tensors are 1D to prevent broadcasting bugs
         if reward.dim() == 2:
             reward = reward.squeeze(1)
         if done.dim() == 2:
             done = done.squeeze(1)
 
-        # Convert one-hot action to class index
         if action.dim() == 2:
             action_idx = action.argmax(dim=-1)
         else:
             action_idx = action
 
-        # Convert action to fire and move labels
-        fire_label, move_label = action_to_fire_move(action_idx)
-
         # Forward pass
-        q_values = model(state)  # (batch, 6)
-        q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
+        q_values = model(state)                                          # (B, 6)
+        q_value  = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (B,)
 
-        # Compute target Q-value
+        # TD target
         with torch.no_grad():
-            next_features = model.cnn(next_state)
-            next_q_values = model.q_network_target(next_features)
-            next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
-            # Now all are (Batch,): reward, done, next_q_value
-            target_q = reward + gamma * next_q_value * (1 - done)
+            next_q_values = model.q_network_target(model.cnn(next_state))
+            next_q_value  = next_q_values.max(dim=1)[0]
+            target_q      = reward + gamma * next_q_value * (1 - done)
 
-        # TD loss (Huber loss for stability)
+        # TD loss (Huber)
         td_loss = F.smooth_l1_loss(q_value, target_q)
 
-        # Marginalize Q-values into fire and move dimensions
-        # Fire: fire=0 (NOOP, RIGHT, LEFT) vs fire=1 (FIRE, RIGHT+FIRE, LEFT+FIRE)
-        fire_q = torch.stack([
-            torch.logsumexp(q_values[:, [0, 2, 3]], dim=1),  # fire=0
-            torch.logsumexp(q_values[:, [1, 4, 5]], dim=1),  # fire=1
-        ], dim=1)  # (batch, 2)
-
-        # Move: move=0 (NOOP, FIRE) vs move=1 (RIGHT, RIGHT+FIRE) vs move=2 (LEFT, LEFT+FIRE)
-        move_q = torch.stack([
-            torch.logsumexp(q_values[:, [0, 1]], dim=1),  # move=0
-            torch.logsumexp(q_values[:, [2, 4]], dim=1),  # move=1
-            torch.logsumexp(q_values[:, [3, 5]], dim=1),  # move=2
-        ], dim=1)  # (batch, 3)
-
-        # CQL loss: per-dimension (fire and move)
-        fire_q_value = fire_q.gather(1, fire_label.unsqueeze(1)).squeeze(1)
-        move_q_value = move_q.gather(1, move_label.unsqueeze(1)).squeeze(1)
-        cql_fire_loss = (torch.logsumexp(fire_q, dim=1) - fire_q_value).mean()
-        cql_move_loss = (torch.logsumexp(move_q, dim=1) - move_q_value).mean()
-        cql_loss = fire_cql_weight * cql_fire_loss + move_cql_weight * cql_move_loss
-
-        # Total loss: TD loss + CQL regularization
+        # Standard discrete CQL (Kumar et al. 2020, eq. 4):
+        #   CQL = E[ logsumexp_a Q(s,a) - Q(s, a_data) ]
+        cql_loss   = (torch.logsumexp(q_values, dim=1) - q_value).mean()
         total_loss = td_loss + model.alpha * cql_loss
 
-        # Backward pass
         optimizer.zero_grad()
         total_loss.backward()
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
 
-        # Update target network periodically for stable Q-learning
         if model.training_step % target_update_freq == 0:
             model.update_target()
 
-        # Statistics
-        total_td_loss += td_loss.item() * state.size(0)
-        total_cql_fire_loss += cql_fire_loss.item() * state.size(0)
-        total_cql_move_loss += cql_move_loss.item() * state.size(0)
-        total_cql_loss += cql_loss.item() * state.size(0)
+        total_td_loss  += td_loss.item()    * state.size(0)
+        total_cql_loss += cql_loss.item()   * state.size(0)
         total_loss_sum += total_loss.item() * state.size(0)
-        total_q_value += q_values.mean().item() * state.size(0)
-        total_samples += state.size(0)
+        total_q_value  += q_values.mean().item() * state.size(0)
+        total_samples  += state.size(0)
 
-    avg_td_loss    = total_td_loss   / total_samples
-    avg_cql_loss   = total_cql_loss  / total_samples
-    avg_total_loss = total_loss_sum  / total_samples
-    avg_q_value    = total_q_value   / total_samples
-
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value
+    return (total_td_loss  / total_samples,
+            total_cql_loss / total_samples,
+            total_loss_sum / total_samples,
+            total_q_value  / total_samples)
 
 
-def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None,
-            fire_cql_weight=1.0, move_cql_weight=1.0):
+def val_cql(model, dataloader, device, gamma=0.99, reward_scale=0.1, action_weights=None):
     """Validation function for CQL with detailed metrics"""
     model.eval()
-    total_td_loss = 0
-    total_cql_fire_loss = 0
-    total_cql_move_loss = 0
+    total_td_loss  = 0
     total_cql_loss = 0
     total_loss_sum = 0
-    total_q_value = 0
-    total_ce_loss = 0
+    total_q_value  = 0
+    total_ce_loss  = 0
     total_wce_loss = 0
-    total_correct = 0
-    total_samples = 0
+    total_correct  = 0
+    total_samples  = 0
 
     with torch.no_grad():
         for batch in dataloader:
-            state = batch['state'].to(device).float() / 255.0
-            action = batch['action'].to(device)
-            reward = batch['reward'].to(device).float() * reward_scale
+            state      = batch['state'].to(device).float() / 255.0
+            action     = batch['action'].to(device)
+            reward     = batch['reward'].to(device).float() * reward_scale
             next_state = batch['next_state'].to(device).float() / 255.0
-            done = batch['done'].to(device).float()
+            done       = batch['done'].to(device).float()
 
-            # Ensure all tensors are 1D to prevent broadcasting bugs
             if reward.dim() == 2:
                 reward = reward.squeeze(1)
             if done.dim() == 2:
                 done = done.squeeze(1)
 
-            # Convert one-hot action to class index
             if action.dim() == 2:
                 action_idx = action.argmax(dim=-1)
             else:
                 action_idx = action
 
-            # Convert action to fire and move labels
-            fire_label, move_label = action_to_fire_move(action_idx)
-
             # Forward pass
-            q_values = model(state)  # (batch, 6)
-            q_value = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)  # (Batch,)
+            q_values = model(state)                                              # (B, 6)
+            q_value  = q_values.gather(1, action_idx.unsqueeze(1)).squeeze(1)   # (B,)
 
-            # Compute target Q-value
-            next_features = model.cnn(next_state)
-            next_q_values = model.q_network_target(next_features)
-            next_q_value = next_q_values.max(dim=1)[0]  # (Batch,)
-            target_q = reward + gamma * next_q_value * (1 - done)
+            # TD target
+            next_q_values = model.q_network_target(model.cnn(next_state))
+            next_q_value  = next_q_values.max(dim=1)[0]
+            target_q      = reward + gamma * next_q_value * (1 - done)
 
-            # TD loss
-            td_loss = F.smooth_l1_loss(q_value, target_q)
+            td_loss  = F.smooth_l1_loss(q_value, target_q)
 
-            # Marginalize Q-values into fire and move dimensions
-            fire_q = torch.stack([
-                torch.logsumexp(q_values[:, [0, 2, 3]], dim=1),  # fire=0
-                torch.logsumexp(q_values[:, [1, 4, 5]], dim=1),  # fire=1
-            ], dim=1)  # (batch, 2)
-
-            move_q = torch.stack([
-                torch.logsumexp(q_values[:, [0, 1]], dim=1),  # move=0
-                torch.logsumexp(q_values[:, [2, 4]], dim=1),  # move=1
-                torch.logsumexp(q_values[:, [3, 5]], dim=1),  # move=2
-            ], dim=1)  # (batch, 3)
-
-            # CQL loss: per-dimension (fire and move)
-            fire_q_value = fire_q.gather(1, fire_label.unsqueeze(1)).squeeze(1)
-            move_q_value = move_q.gather(1, move_label.unsqueeze(1)).squeeze(1)
-            cql_fire_loss = (torch.logsumexp(fire_q, dim=1) - fire_q_value).mean()
-            cql_move_loss = (torch.logsumexp(move_q, dim=1) - move_q_value).mean()
-            cql_loss = fire_cql_weight * cql_fire_loss + move_cql_weight * cql_move_loss
-
-            # Total loss
+            # Standard discrete CQL
+            cql_loss   = (torch.logsumexp(q_values, dim=1) - q_value).mean()
             total_loss = td_loss + model.alpha * cql_loss
 
-            # Z-score normalize Q-values across 6 actions, use as logits for CE
-            q_mean = q_values.mean(dim=-1, keepdim=True)
-            q_std = q_values.std(dim=-1, keepdim=True) + 1e-8
-            z_values = (q_values - q_mean) / q_std  # (B, 6)
-            ce_loss  = F.cross_entropy(z_values, action_idx)
-            wce_loss = F.cross_entropy(z_values, action_idx, weight=action_weights)
+            # Action prediction accuracy (z-scored Q as logits)
+            q_mean      = q_values.mean(dim=-1, keepdim=True)
+            q_std       = q_values.std(dim=-1, keepdim=True) + 1e-8
+            z_values    = (q_values - q_mean) / q_std
+            ce_loss     = F.cross_entropy(z_values, action_idx)
+            wce_loss    = F.cross_entropy(z_values, action_idx, weight=action_weights)
             action_pred = z_values.argmax(dim=-1)
 
-            # Statistics
-            total_td_loss      += td_loss.item()          * state.size(0)
-            total_cql_fire_loss += cql_fire_loss.item()   * state.size(0)
-            total_cql_move_loss += cql_move_loss.item()   * state.size(0)
-            total_cql_loss     += cql_loss.item()         * state.size(0)
-            total_loss_sum     += total_loss.item()       * state.size(0)
-            total_q_value      += q_values.mean().item()  * state.size(0)
-            total_ce_loss      += ce_loss.item()          * state.size(0)
-            total_wce_loss     += wce_loss.item()         * state.size(0)
-            total_correct      += (action_pred == action_idx).sum().item()
-            total_samples      += state.size(0)
+            total_td_loss  += td_loss.item()    * state.size(0)
+            total_cql_loss += cql_loss.item()   * state.size(0)
+            total_loss_sum += total_loss.item() * state.size(0)
+            total_q_value  += q_values.mean().item() * state.size(0)
+            total_ce_loss  += ce_loss.item()    * state.size(0)
+            total_wce_loss += wce_loss.item()   * state.size(0)
+            total_correct  += (action_pred == action_idx).sum().item()
+            total_samples  += state.size(0)
 
-    avg_td_loss     = total_td_loss    / total_samples
-    avg_cql_loss    = total_cql_loss   / total_samples
-    avg_total_loss  = total_loss_sum   / total_samples
-    avg_q_value     = total_q_value    / total_samples
-    avg_ce_loss     = total_ce_loss    / total_samples
-    avg_wce_loss    = total_wce_loss   / total_samples
-    action_accuracy = total_correct    / total_samples
-
-    return avg_td_loss, avg_cql_loss, avg_total_loss, avg_q_value, avg_ce_loss, avg_wce_loss, action_accuracy
+    return (total_td_loss  / total_samples,
+            total_cql_loss / total_samples,
+            total_loss_sum / total_samples,
+            total_q_value  / total_samples,
+            total_ce_loss  / total_samples,
+            total_wce_loss / total_samples,
+            total_correct  / total_samples)
