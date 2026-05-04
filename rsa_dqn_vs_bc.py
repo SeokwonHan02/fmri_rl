@@ -87,7 +87,7 @@ def get_args():
 
     # Game data
     p.add_argument('--data_dir', default=str(_ROOT / 'processed_data_frameskip_4'))
-    p.add_argument('--subject',  default='sub_1',
+    p.add_argument('--subject',  default='sub_2',
                    choices=['sub_1', 'sub_2', 'sub_3', 'sub_4', 'sub_5', 'sub_6'])
     p.add_argument('--file_idx', nargs='+', type=int, default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
                    help='game npz 파일 인덱스 목록. BOLD/sub-00N/run/runK/ 와 1:1 대응.')
@@ -106,7 +106,7 @@ def get_args():
 
     # Model paths
     p.add_argument('--dqn_path', default=str(_ROOT / 'pretrained' / 'dqn_cnn.pt'))
-    p.add_argument('--bc_path',  default=str(_ROOT / 'trained_models_2' / 'sub_1_bc.pth'))
+    p.add_argument('--bc_path',  default=str(_ROOT / 'trained_models_2' / 'sub_2_bc.pth'))
 
     # PCA
     p.add_argument('--pca_dim', type=int, default=20,
