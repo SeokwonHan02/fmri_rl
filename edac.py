@@ -115,10 +115,15 @@ def get_args():
     p.add_argument('--div-type',    default='edac_grad',
                    choices=['edac_grad','advantage_orthogonal','policy_js','none'])
     p.add_argument('--lambda-div',  type=float, default=1.0)
+    p.add_argument('--cql-alpha',   type=float, default=0.0,
+                   help='CQL conservative penalty weight (0 = disabled). '
+                        'L_CQL = logsumexp_a Q(s,a) - Q(s, a_data)')
     p.add_argument('--target-js',   type=float, default=0.03,
                    help='Target JS for policy_js diversity')
     p.add_argument('--div-tau',     type=float, default=1.0,
                    help='Softmax temperature for policy_js diversity')
+    p.add_argument('--div-batch-size', type=int, default=512,
+                   help='Number of states used for diversity loss')
     p.add_argument('--tau-unc',     type=float, default=1.0,
                    help='Softmax temperature for uncertainty metrics  p = softmax(Q / tau_unc)')
 
@@ -402,6 +407,24 @@ def compute_critic_loss(head_h: CriticHead,
         y = r + gamma * (1.0 - d) * v_next
 
     return F.smooth_l1_loss(q_sa, y)
+
+
+# ── CQL conservative penalty ─────────────────────────────────────────────────
+
+def compute_cql_loss(head_h: CriticHead, feat_s: torch.Tensor,
+                      a: torch.Tensor, n_actions: int = 6) -> torch.Tensor:
+    """
+    CQL penalty for discrete actions (Kumar et al., 2020):
+      L_CQL = E_s[ logsumexp_a Q(s,a) - Q(s, a_data) ]
+    Pushes Q down on OOD actions and up on data actions, preventing
+    the critic from overestimating out-of-distribution Q-values.
+    Uses q_values_all_actions to evaluate all A discrete actions efficiently.
+    """
+    q_all = q_values_all_actions(head_h, feat_s)           # (B, A)
+    logsumexp_q = torch.logsumexp(q_all, dim=-1)           # (B,)
+    a_oh  = F.one_hot(a, num_classes=n_actions).float()
+    q_sa  = head_h(feat_s, a_oh)                           # (B,)
+    return (logsumexp_q - q_sa).mean()
 
 
 # ── Actor loss ────────────────────────────────────────────────────────────────
@@ -758,14 +781,15 @@ def train(args):
         if not args.freeze_cnn:
             cnn.train()
 
-        log = dict(td=[], div=[], actor=[], alpha_loss=[], policy_ent=[], q_mean=[])
+        log = dict(td=[], cql=[], div=[], actor=[], alpha_loss=[], policy_ent=[], q_mean=[])
 
         for _ in range(iters_per_epoch):
             if args.learn_alpha:
                 alpha = log_alpha.exp().item()
 
             # ── Critic update ──────────────────────────────────────────────
-            td_sum      = torch.tensor(0.0, device=device)
+            td_sum  = torch.tensor(0.0, device=device)
+            cql_sum = torch.tensor(0.0, device=device)
             feat_s_list = []
 
             for h in range(args.num_heads):
@@ -781,6 +805,12 @@ def train(args):
                     args.gamma, alpha, n_actions=A,
                 )
                 td_sum = td_sum + td
+
+                if args.cql_alpha > 0.0:
+                    cql_sum = cql_sum + compute_cql_loss(
+                        critics[h], feat_s, a, n_actions=A
+                    )
+
                 feat_s_list.append(feat_s.detach())
 
                 with torch.no_grad():
@@ -789,15 +819,22 @@ def train(args):
                     ).mean().item()
                 log['q_mean'].append(q_mean_val)
 
-            td_mean  = td_sum / args.num_heads
-            feat_div = torch.cat(feat_s_list, dim=0)   # (H*B, 3136)
+            td_mean   = td_sum  / args.num_heads
+            cql_mean  = cql_sum / args.num_heads
+            feat_div  = torch.cat(feat_s_list, dim=0)  # (H*B, 3136)
+
+            if feat_div.size(0) > args.div_batch_size:
+                div_idx  = torch.randperm(feat_div.size(0), device=feat_div.device)[:args.div_batch_size]
+                feat_div = feat_div[div_idx]
 
             div_loss = compute_diversity_loss(
                 critics, feat_div, actor, A,
                 args.div_type, args.div_tau, args.target_js,
             )
 
-            critic_loss = td_mean + args.lambda_div * div_loss
+            critic_loss = (td_mean
+                           + args.lambda_div * div_loss
+                           + args.cql_alpha  * cql_mean)
             critic_opt.zero_grad()
             critic_loss.backward()
             nn.utils.clip_grad_norm_(
@@ -839,6 +876,7 @@ def train(args):
                     p_tgt.data.mul_(1.0 - args.tau).add_(args.tau * p_src.data)
 
             log['td'].append(td_mean.item())
+            log['cql'].append(cql_mean.item())
             log['div'].append(div_loss.item())
             log['actor'].append(actor_loss.item())
             log['alpha_loss'].append(alpha_loss_val)
@@ -849,12 +887,13 @@ def train(args):
         print(
             f'Epoch {epoch:3d}/{args.epochs}  '
             f'td={np.mean(log["td"]):.4f}  '
+            f'cql={np.mean(log["cql"]):.4f}  '
             f'div={np.mean(log["div"]):.6f}  '
             f'actor={np.mean(log["actor"]):.4f}  '
             f'α={alpha:.4f}  '
             f'H_π={np.mean(log["policy_ent"]):.4f}  '
             f'Q_mean={np.mean(log["q_mean"]):.3f}',
-            flush = True
+            flush=True
         )
 
         evaluate_uncertainty(critics, actor, cnn, dataset, device, tau_unc=args.tau_unc)
