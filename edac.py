@@ -4,24 +4,26 @@ edac.py — EDAC-style Ensemble Offline Actor-Critic for Atari (discrete actions
 This is NOT imitation learning.
   - Human actions are offline transition data used ONLY for Bellman backup.
   - No BC loss, no imitation constraint of any kind.
-  - Diversity is driven by bootstrap masking + EDAC-style regularizer on critics.
+  - Diversity is driven by bootstrap masking + EDAC-style gradient regularizer.
   - The resulting epistemic uncertainty reflects Q-value disagreement across heads,
     NOT human behavioral uncertainty. Validate behaviorally before interpreting.
 
 Architecture:
   - Actor  : π(a|s) = softmax(Linear(3136→512)→ReLU→Linear(512→A))
-  - Critics: H independent Q-heads (same architecture as actor head)
+  - Critics: H independent action-conditioned heads Q(s,a) = MLP([feat ‖ a_soft] → 1)
   - CNN    : shared frozen backbone from pretrained DQN
   - Target : hard-copy of critics; no target actor needed (discrete SAC)
 
 Training:
-  - Critic loss : SAC-discrete Bellman
-      V(s') = Σ_a π(a|s')[Q_target_mean(s',a') - α log π(a|s')]
-      y_h   = r + γ(1-d)V(s')
-      L_c_h = smooth_l1(Q_h(s, a_data), y_h)
-  - Actor  loss : L_a = Σ_a π(a|s)[α log π(a|s) - Q_mean_or_min(s,a)]
-  - Alpha  loss : L_α = -α(H(π) - target_entropy)  [if learn_alpha]
-  - Div    loss : EDAC advantage_orthogonal or policy_js on critic ensemble
+  - Critic : SAC-discrete with ensemble-minimum target
+      Q_target(s',a') = min_j Q_target_j(s', a')
+      V(s')  = Σ_a π(a'|s') [min_j Q_target_j(s',a') − α log π(a'|s')]
+      y_h    = r + γ(1−d) V(s')
+      L_c_h  = smooth_l1(Q_h(s, a_data), y_h)
+  - Actor  : L_a = Σ_a π(a|s)[α log π(a|s) − Q_min/mean(s,a)]
+  - Alpha  : L_α = −α(H(π) − H_target)  [if --learn-alpha]
+  - Div    : edac_grad — cosine² between per-critic ∂Q_i/∂a_relaxed vectors
+             (fallbacks: advantage_orthogonal, policy_js)
 """
 
 import argparse
@@ -39,61 +41,15 @@ import torch.nn.functional as F
 _ROOT = Path(__file__).parent
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
-def get_args():
-    p = argparse.ArgumentParser(description='EDAC ensemble offline actor-critic')
-    # Data
-    p.add_argument('--data_dir',    default=str(_ROOT / 'processed_data_frameskip_4'))
-    p.add_argument('--subject',     default='sub_1')
-    p.add_argument('--file_idx',    nargs='+', type=int,
-                   default=[0,1,2,3,4,5,6,7,8,9,10])
-    # Model paths
-    p.add_argument('--dqn_path',    default=str(_ROOT / 'pretrained' / 'dqn_cnn.pt'))
-    p.add_argument('--out_path',    default=str(_ROOT / 'trained_models_edac' / 'sub_1_edac_ens.pth'))
-    p.add_argument('--freeze_cnn',  action='store_true', default=True)
-    # Ensemble
-    p.add_argument('--num_heads',   type=int,   default=10)
-    # Training
-    p.add_argument('--batch_size',  type=int,   default=256)
-    p.add_argument('--epochs',      type=int,   default=20)
-    p.add_argument('--lr',          type=float, default=1e-4,
-                   help='Critic (and CNN if unfreeze) learning rate')
-    p.add_argument('--actor_lr',    type=float, default=1e-4)
-    p.add_argument('--gamma',       type=float, default=0.99)
-    p.add_argument('--target_update_interval', type=int, default=1000)
-    p.add_argument('--iters_per_epoch', type=int, default=0,
-                   help='0 = auto (min_head_len // batch_size)')
-    # Bootstrap
-    p.add_argument('--bootstrap_frac', type=float, default=0.7)
-    p.add_argument('--bootstrap_mode', choices=['frame','block','run'], default='block')
-    p.add_argument('--block_size',  type=int,   default=512)
-    # Entropy temperature
-    p.add_argument('--alpha',       type=float, default=0.1,
-                   help='Entropy temperature (fixed if --learn_alpha not set)')
-    p.add_argument('--learn_alpha', action='store_true', default=False)
-    p.add_argument('--alpha_lr',    type=float, default=3e-4)
-    p.add_argument('--target_entropy', type=float, default=None,
-                   help='Target policy entropy. Default: -ln(1/A) * 0.5')
-    # Actor Q pessimism
-    p.add_argument('--q_pessimism', choices=['mean','min'], default='min',
-                   help='Q aggregation for actor update (min = conservative)')
-    # Diversity
-    p.add_argument('--div_type',    choices=['advantage_orthogonal','policy_js','none'],
-                   default='advantage_orthogonal')
-    p.add_argument('--lambda_div',  type=float, default=0.01)
-    p.add_argument('--target_js',   type=float, default=0.03)
-    p.add_argument('--div_tau',     type=float, default=1.0,
-                   help='Softmax temperature for policy_js diversity')
-    # Misc
-    p.add_argument('--grad_clip',   type=float, default=10.0)
-    p.add_argument('--seed',        type=int,   default=42)
-    p.add_argument('--device',      default='cuda' if torch.cuda.is_available() else 'cpu')
-    p.add_argument('--save_every',  type=int,   default=0)
-    return p.parse_args()
+def safe_save(obj, path: Path):
+    """Atomic save: write to .tmp then rename to prevent EOCD corruption."""
+    path = Path(path)
+    tmp  = path.with_suffix('.tmp')
+    torch.save(obj, tmp)
+    tmp.replace(path)
 
-
-# ── Reproducibility ───────────────────────────────────────────────────────────
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -103,15 +59,90 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def get_args():
+    p = argparse.ArgumentParser(description='EDAC ensemble offline actor-critic')
+
+    # Data (aligned with main.py)
+    p.add_argument('--data-dir',    default=str(_ROOT / 'processed_data_frameskip_4'),
+                   help='Base directory containing processed subject data')
+    p.add_argument('--subject',     default='sub_1',
+                   choices=['sub_1','sub_2','sub_3','sub_4','sub_5','sub_6'])
+    p.add_argument('--file-idx',    nargs='+', type=int,
+                   default=[0,1,2,3,4,5,6,7,8,9,10])
+
+    # Model paths (aligned with main.py)
+    p.add_argument('--dqn-path',    default=str(_ROOT / 'pretrained' / 'dqn_cnn.pt'),
+                   help='Path to pretrained DQN CNN checkpoint')
+    p.add_argument('--save-dir',    default=str(_ROOT / 'checkpoints'),
+                   help='Root save dir; models saved to save_dir/edac/<subject>/')
+    p.add_argument('--freeze-cnn',  action='store_true', default=True)
+
+    # Ensemble
+    p.add_argument('--num-heads',   type=int,   default=10)
+
+    # Training (aligned with main.py)
+    p.add_argument('--batch-size',  type=int,   default=256)
+    p.add_argument('--epochs',      type=int,   default=20)
+    p.add_argument('--lr',          type=float, default=1e-4,
+                   help='Critic learning rate')
+    p.add_argument('--actor-lr',    type=float, default=1e-4)
+    p.add_argument('--gamma',       type=float, default=0.99)
+    p.add_argument('--target-update-freq', type=int, default=1000,
+                   help='Hard target copy interval (steps); aligned with main.py')
+    p.add_argument('--iters-per-epoch', type=int, default=0,
+                   help='0 = auto (min_head_len // batch_size)')
+
+    # Bootstrap
+    p.add_argument('--bootstrap-frac', type=float, default=0.7)
+    p.add_argument('--bootstrap-mode', choices=['frame','block','run'], default='block')
+    p.add_argument('--block-size',  type=int,   default=512)
+
+    # Entropy temperature
+    p.add_argument('--alpha',       type=float, default=0.1,
+                   help='SAC entropy temperature (fixed unless --learn-alpha)')
+    p.add_argument('--learn-alpha', action='store_true', default=False)
+    p.add_argument('--alpha-lr',    type=float, default=3e-4)
+    p.add_argument('--target-entropy', type=float, default=None,
+                   help='Target entropy; default −ln(1/A)×0.5')
+
+    # Actor Q pessimism
+    p.add_argument('--q-pessimism', choices=['mean','min'], default='min',
+                   help='Q aggregation for actor update')
+
+    # Diversity
+    p.add_argument('--div-type',    default='edac_grad',
+                   choices=['edac_grad','advantage_orthogonal','policy_js','none'])
+    p.add_argument('--lambda-div',  type=float, default=1.0)
+    p.add_argument('--target-js',   type=float, default=0.03,
+                   help='Target JS for policy_js diversity')
+    p.add_argument('--div-tau',     type=float, default=1.0,
+                   help='Softmax temperature for policy_js diversity')
+
+    # Misc (aligned with main.py)
+    p.add_argument('--grad-clip',   type=float, default=10.0)
+    p.add_argument('--seed',        type=int,   default=42)
+    p.add_argument('--device',      default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--save-interval', type=int, default=1,
+                   help='Checkpoint save interval (epochs)')
+
+    # Evaluation (aligned with main.py)
+    p.add_argument('--env-name',      default='SpaceInvadersNoFrameskip-v4')
+    p.add_argument('--eval-episodes', type=int,  default=30)
+    p.add_argument('--eval-interval', type=int,  default=1,
+                   help='Game evaluation interval (epochs)')
+    p.add_argument('--deterministic', action='store_true', default=True)
+    p.add_argument('--stochastic',    dest='deterministic', action='store_false')
+
+    return p.parse_args()
+
+
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def load_dqn(dqn_path: str):
-    """
-    Load DQN (conv + fc3 + fc_out) from checkpoint. Returns model in eval mode on CPU.
-    Supports checkpoints storing state_dict directly or under 'policy_net'.
-    """
+    """Load DQN CNN backbone from checkpoint. Returns model in eval mode."""
     import sys
-    import torch
     sys.path.insert(0, str(_ROOT))
     from model.dqn import DQN
 
@@ -154,8 +185,8 @@ def load_offline_transitions(data_dir: str, subject: str,
             print(f'  WARNING: file_idx {fidx} out of range, skip')
             continue
         data   = np.load(npz_files[fidx])
-        states = data['state']                          # (T, 4, 84, 84) uint8
-        acts   = data['action']                         # (T, 6) one-hot or (T,) int
+        states = data['state']
+        acts   = data['action']
         rews   = data['reward'].astype(np.float32)
         T      = len(states)
 
@@ -163,8 +194,8 @@ def load_offline_transitions(data_dir: str, subject: str,
             acts = acts.argmax(axis=1)
         acts = acts.astype(np.int64)
 
-        d        = np.zeros(T - 1, dtype=np.float32)
-        d[-1]    = 1.0
+        d     = np.zeros(T - 1, dtype=np.float32)
+        d[-1] = 1.0
         all_s.append(states[:-1]);  all_ns.append(states[1:])
         all_a.append(acts[:-1]);    all_r.append(rews[:-1])
         all_d.append(d)
@@ -199,7 +230,6 @@ def build_bootstrap_indices(dataset: OfflineDataset,
             idx_list = []
             for rid in np.unique(run_ids):
                 pos = np.where(run_ids == rid)[0]
-                # FIX: ceil so last partial block is not missed
                 n_blocks = int(np.ceil(len(pos) / block_size))
                 for b in range(n_blocks):
                     if rng.random() < frac:
@@ -223,11 +253,28 @@ def build_bootstrap_indices(dataset: OfflineDataset,
 
 # ── Networks ──────────────────────────────────────────────────────────────────
 
+class CriticHead(nn.Module):
+    """
+    Action-conditioned Q-function: Q(s, a_soft) → scalar per sample.
+    Input: concatenated [feat (3136) ‖ a_soft (A)] → hidden → 1.
+    Used with one-hot actions for Bellman backup and with relaxed actions
+    for EDAC gradient diversity.
+    """
+    def __init__(self, feat_dim: int = 3136, n_actions: int = 6, hidden: int = 512):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim + n_actions, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, feat: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        # feat: (B, feat_dim),  a: (B, A) — one-hot or soft
+        return self.net(torch.cat([feat, a], dim=-1)).squeeze(-1)  # (B,)
+
+
 class Actor(nn.Module):
-    """
-    Stochastic policy π(a|s) for discrete actions.
-    Returns (probs, log_probs) both (B, A) using log_softmax for stability.
-    """
+    """Stochastic policy π(a|s) for discrete actions."""
     def __init__(self, feat_dim: int = 3136, hidden: int = 512, n_actions: int = 6):
         super().__init__()
         self.net = nn.Sequential(
@@ -235,15 +282,39 @@ class Actor(nn.Module):
         )
 
     def forward(self, feat: torch.Tensor):
-        logits    = self.net(feat)                       # (B, A)
-        log_probs = F.log_softmax(logits, dim=-1)        # (B, A)
-        return log_probs.exp(), log_probs                # probs, log_probs
+        log_probs = F.log_softmax(self.net(feat), dim=-1)
+        return log_probs.exp(), log_probs   # probs (B,A), log_probs (B,A)
 
 
-def build_critics(num_heads: int) -> nn.ModuleList:
-    """Each critic head: Linear(3136→512)→ReLU→Linear(512→6)."""
+class EDACAgent:
+    """Evaluation wrapper (CNN encoder + Actor) compatible with eval.evaluate_agent."""
+    def __init__(self, cnn, actor: Actor, n_actions: int, device):
+        self.cnn      = cnn
+        self.actor    = actor
+        self.n_actions = n_actions
+        self.device   = device
+
+    def eval(self):
+        self.cnn.eval()
+        self.actor.eval()
+        return self
+
+    def get_action(self, state, deterministic: bool = True) -> int:
+        # state: (4, 84, 84) float [0,1], already normalised by eval.py
+        if not isinstance(state, torch.Tensor):
+            state = torch.from_numpy(np.asarray(state)).float()
+        s = state.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            feat = extract_features(self.cnn, s)
+            probs, _ = self.actor(feat)
+        if deterministic:
+            return probs.argmax(dim=-1).item()
+        return torch.multinomial(probs, 1).item()
+
+
+def build_critics(num_heads: int, n_actions: int = 6) -> nn.ModuleList:
     return nn.ModuleList([
-        nn.Sequential(nn.Linear(3136, 512), nn.ReLU(), nn.Linear(512, 6))
+        CriticHead(feat_dim=3136, n_actions=n_actions)
         for _ in range(num_heads)
     ])
 
@@ -252,7 +323,7 @@ def build_critics(num_heads: int) -> nn.ModuleList:
 
 @torch.no_grad()
 def extract_features(cnn, x: torch.Tensor) -> torch.Tensor:
-    """(B, 4, 84, 84) float32 [0,1] → (B, 3136)"""
+    """(B, 4, 84, 84) float [0,1] → (B, 3136)"""
     h = F.relu(cnn.conv1(x))
     h = F.relu(cnn.conv2(h))
     h = F.relu(cnn.conv3(h))
@@ -264,6 +335,22 @@ def extract_features_grad(cnn, x: torch.Tensor) -> torch.Tensor:
     h = F.relu(cnn.conv2(h))
     h = F.relu(cnn.conv3(h))
     return h.view(h.size(0), -1)
+
+
+# ── Action-conditioned Q helpers ──────────────────────────────────────────────
+
+def q_values_all_actions(critic: CriticHead, feat: torch.Tensor) -> torch.Tensor:
+    """
+    Compute Q(s, a_i) for every discrete action a_i by passing one-hot vectors.
+    Returns (B, A).
+    """
+    B, device = feat.size(0), feat.device
+    A = 6
+    eye = torch.eye(A, device=device)                     # (A, A)
+    # Batch all actions at once: feat repeated A times
+    feat_exp = feat.unsqueeze(1).expand(-1, A, -1).reshape(B * A, -1)  # (B*A, D)
+    a_exp    = eye.unsqueeze(0).expand(B, -1, -1).reshape(B * A, A)    # (B*A, A)
+    return critic(feat_exp, a_exp).reshape(B, A)           # (B, A)
 
 
 # ── Batch sampling ────────────────────────────────────────────────────────────
@@ -281,33 +368,36 @@ def sample_batch(dataset: OfflineDataset, head_idx: np.ndarray,
 
 def sample_global_batch(dataset: OfflineDataset, batch_size: int, device: str):
     idx = np.random.choice(dataset.N, batch_size, replace=False)
-    s  = torch.from_numpy(dataset.states[idx].astype(np.float32) / 255.0).to(device)
-    return s
+    return torch.from_numpy(dataset.states[idx].astype(np.float32) / 255.0).to(device)
 
 
-# ── Critic loss (SAC-discrete Bellman) ────────────────────────────────────────
+# ── Critic loss (SAC-discrete, ensemble-minimum target) ───────────────────────
 
-def compute_critic_loss(head_h, target_heads: nn.ModuleList, actor: Actor,
+def compute_critic_loss(head_h: CriticHead,
+                         target_heads: nn.ModuleList,
+                         actor: Actor,
                          feat_s: torch.Tensor, feat_ns: torch.Tensor,
                          a: torch.Tensor, r: torch.Tensor, d: torch.Tensor,
-                         gamma: float, alpha: float) -> torch.Tensor:
+                         gamma: float, alpha: float,
+                         n_actions: int = 6) -> torch.Tensor:
     """
-    SAC-discrete target:
-      V(s') = Σ_a π(a'|s') [Q_target_mean(s',a') - α log π(a'|s')]
-      y     = r + γ(1-d) V(s')
-    No BC loss. Bellman backup only.
+    SAC-discrete Bellman backup with ensemble-minimum target Q:
+      Q_target(s',a') = min_j Q_target_j(s', a')   [pessimistic target]
+      V(s') = Σ_a π(a'|s') [Q_target_min(s',a') − α log π(a'|s')]
+      y = r + γ(1−d) V(s')
     """
-    q_sa = head_h(feat_s).gather(1, a.unsqueeze(1)).squeeze(1)    # (B,)
+    a_oh = F.one_hot(a, num_classes=n_actions).float()    # (B, A)
+    q_sa = head_h(feat_s, a_oh)                           # (B,)
 
     with torch.no_grad():
-        next_probs, next_log_probs = actor(feat_ns)                # (B, A)
+        next_probs, next_log = actor(feat_ns)              # (B, A)
+        # (B, H, A) → min across heads → (B, A)
         q_next_all = torch.stack(
-            [th(feat_ns) for th in target_heads], dim=1
-        )                                                           # (B, H, A)
-        q_next_mean = q_next_all.mean(dim=1)                       # (B, A)
-        # Soft value: weighted sum over actions
-        v_next = (next_probs * (q_next_mean - alpha * next_log_probs)).sum(dim=-1)  # (B,)
-        y      = r + gamma * (1.0 - d) * v_next                   # (B,)
+            [q_values_all_actions(th, feat_ns) for th in target_heads], dim=1
+        )
+        q_next_min = q_next_all.min(dim=1).values         # (B, A)
+        v_next = (next_probs * (q_next_min - alpha * next_log)).sum(dim=-1)  # (B,)
+        y = r + gamma * (1.0 - d) * v_next
 
     return F.smooth_l1_loss(q_sa, y)
 
@@ -317,108 +407,162 @@ def compute_critic_loss(head_h, target_heads: nn.ModuleList, actor: Actor,
 def compute_actor_loss(actor: Actor, critics: nn.ModuleList,
                         feat_s: torch.Tensor,
                         alpha: float, q_pessimism: str):
-    """
-    L_actor = Σ_a π(a|s) [α log π(a|s) - Q(s,a)]
-    Q is detached from critics (no gradient into critic on actor step).
-    """
-    probs, log_probs = actor(feat_s)                               # (B, A)
+    """L_a = Σ_a π(a|s)[α log π(a|s) − Q(s,a)], Q detached from critics."""
+    probs, log_probs = actor(feat_s)                      # (B, A)
     with torch.no_grad():
-        q_all = torch.stack([h(feat_s) for h in critics], dim=1)  # (B, H, A)
+        q_all = torch.stack(
+            [q_values_all_actions(h, feat_s) for h in critics], dim=1
+        )                                                  # (B, H, A)
         q_for_actor = (q_all.min(dim=1).values if q_pessimism == 'min'
-                       else q_all.mean(dim=1))                     # (B, A)
-    loss           = (probs * (alpha * log_probs - q_for_actor)).sum(dim=-1).mean()
+                       else q_all.mean(dim=1))             # (B, A)
+    loss          = (probs * (alpha * log_probs - q_for_actor)).sum(dim=-1).mean()
     policy_entropy = -(probs * log_probs).sum(dim=-1).mean().item()
     return loss, policy_entropy
 
 
-# ── Alpha loss (learnable temperature) ───────────────────────────────────────
+# ── Alpha loss ────────────────────────────────────────────────────────────────
 
 def compute_alpha_loss(log_alpha: torch.Tensor, probs: torch.Tensor,
                         log_probs: torch.Tensor, target_entropy: float):
-    """L_α = -α · (H(π) - H_target)"""
     with torch.no_grad():
-        entropy = -(probs * log_probs).sum(dim=-1)                 # (B,)
+        entropy = -(probs * log_probs).sum(dim=-1)
     return -(log_alpha * (entropy - target_entropy).detach()).mean()
 
 
-# ── EDAC diversity regularizer ────────────────────────────────────────────────
+# ── EDAC action-gradient diversity ────────────────────────────────────────────
 
-def compute_diversity_loss(critics: nn.ModuleList, feat: torch.Tensor,
-                            div_type: str, div_tau: float,
-                            target_js: float, eps: float = 1e-8) -> torch.Tensor:
+def compute_edac_action_gradient_diversity(
+        critics: nn.ModuleList,
+        feat: torch.Tensor,
+        actor: Actor,
+        n_actions: int,
+        eps: float = 1e-8,
+        action_source: str = 'actor') -> torch.Tensor:
     """
-    advantage_orthogonal:
-      Penalizes cosine similarity between per-head advantage vectors.
-      Encourages heads to disagree on which actions are relatively better.
+    EDAC-style diversity adapted for discrete actions (An et al., 2021).
 
-    policy_js:
-      Squared deviation of mean JS divergence from target_js.
-      Prevents both collapse and unbounded divergence.
+    For discrete actions the policy-gradient analogue uses a relaxed action
+    vector a_relaxed ∈ Δ^(A−1).  We treat a_relaxed as a leaf and differentiate
+    Q_i(feat, a_relaxed) w.r.t. a_relaxed, giving a direction in action-simplex
+    space.  Penalising cosine² between these directions across critic pairs
+    encourages each critic to respond differently to the same action perturbation.
+
+    a_relaxed = π(a|s).detach()  [action_source='actor', default]
+             or uniform 1/A      [action_source='uniform']
     """
     H = len(critics)
 
-    if div_type == 'advantage_orthogonal':
-        q_all = torch.stack([h(feat) for h in critics], dim=1)    # (B, H, A)
-        adv   = q_all - q_all.mean(dim=-1, keepdim=True)           # (B, H, A)
-        adv_n = adv / adv.norm(dim=-1, keepdim=True).clamp(min=eps)# (B, H, A)
-        cos   = torch.einsum('bha,bka->bhk', adv_n, adv_n)         # (B, H, H)
+    if action_source == 'actor':
+        with torch.no_grad():
+            probs, _ = actor(feat.detach())
+        a_relaxed = probs.detach().clone()
+    else:  # 'uniform'
+        a_relaxed = torch.full((feat.size(0), n_actions), 1.0 / n_actions,
+                                device=feat.device)
+
+    a_relaxed = a_relaxed.requires_grad_(True)   # leaf tensor
+
+    grads = []
+    for critic in critics:
+        q_i = critic(feat.detach(), a_relaxed).sum()
+        grad_i = torch.autograd.grad(
+            q_i, a_relaxed,
+            create_graph=True,    # retain graph for critic backward pass
+            retain_graph=True,
+        )[0]                      # (B, A)
+        grad_norm = grad_i / grad_i.norm(dim=-1, keepdim=True).clamp(min=eps)
+        grads.append(grad_norm)
+
+    loss  = torch.tensor(0.0, device=feat.device)
+    count = 0
+    for i in range(H):
+        for j in range(i + 1, H):
+            cos_ij = (grads[i] * grads[j]).sum(dim=-1)   # (B,)
+            loss   = loss + (cos_ij ** 2).mean()
+            count += 1
+
+    return loss / max(count, 1)
+
+
+# ── Diversity loss dispatcher ─────────────────────────────────────────────────
+
+def compute_diversity_loss(critics: nn.ModuleList,
+                            feat: torch.Tensor,
+                            actor: Actor,
+                            n_actions: int,
+                            div_type: str,
+                            div_tau: float,
+                            target_js: float,
+                            eps: float = 1e-8) -> torch.Tensor:
+    if div_type == 'edac_grad':
+        return compute_edac_action_gradient_diversity(
+            critics, feat, actor, n_actions, eps=eps, action_source='actor'
+        )
+
+    elif div_type == 'advantage_orthogonal':
+        q_all = torch.stack(
+            [q_values_all_actions(h, feat) for h in critics], dim=1
+        )                                                    # (B, H, A)
+        adv   = q_all - q_all.mean(dim=-1, keepdim=True)
+        adv_n = adv / adv.norm(dim=-1, keepdim=True).clamp(min=eps)
+        cos   = torch.einsum('bha,bka->bhk', adv_n, adv_n)  # (B, H, H)
+        H     = len(critics)
         mask  = torch.triu(torch.ones(H, H, device=feat.device, dtype=torch.bool),
                            diagonal=1)
         return (cos[:, mask] ** 2).mean()
 
     elif div_type == 'policy_js':
-        q_all   = torch.stack([h(feat) for h in critics], dim=1)  # (B, H, A)
-        probs   = F.softmax(q_all / div_tau, dim=-1)               # (B, H, A)
-        p_bar   = probs.mean(dim=1)                                # (B, A)
-        h_total = -(p_bar * (p_bar + eps).log()).sum(dim=-1)       # (B,)
-        h_heads = -(probs * (probs + eps).log()).sum(dim=-1)       # (B, H)
-        js      = (h_total - h_heads.mean(dim=1)).mean()
+        q_all  = torch.stack(
+            [q_values_all_actions(h, feat) for h in critics], dim=1
+        )
+        probs  = F.softmax(q_all / div_tau, dim=-1)
+        p_bar  = probs.mean(dim=1)
+        h_tot  = -(p_bar * (p_bar + eps).log()).sum(dim=-1)
+        h_heads= -(probs  * (probs  + eps).log()).sum(dim=-1)
+        js     = (h_tot - h_heads.mean(dim=1)).mean()
         return (js - target_js) ** 2
 
-    else:
+    else:  # 'none'
         return torch.tensor(0.0, device=feat.device)
 
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+# ── Uncertainty diagnostics ───────────────────────────────────────────────────
 
 @torch.no_grad()
 def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
                           cnn, dataset: OfflineDataset,
-                          device: str, n_eval: int = 10_000):
+                          device: str, n_eval: int = 10_000) -> float:
     """
-    Ensemble diagnostics:
-      total/aleatoric/epistemic entropy, vote entropy, agreement,
-      pairwise JS (stabilized), actor policy entropy.
+    Print per-metric uncertainty statistics and return mean pairwise JS.
+    Uses q_values_all_actions to build q_all (B, H, A) from action-conditioned critics.
     """
     rng = np.random.default_rng(0)
     idx = rng.choice(dataset.N, min(n_eval, dataset.N), replace=False)
-    s   = torch.from_numpy(
-        dataset.states[idx].astype(np.float32) / 255.0
-    ).to(device)
+    s   = torch.from_numpy(dataset.states[idx].astype(np.float32) / 255.0).to(device)
 
-    feat  = extract_features(cnn, s)                               # (B, 3136)
-    q_all = torch.stack([h(feat) for h in critics], dim=1)        # (B, H, A)
-    probs = F.softmax(q_all, dim=-1)                               # (B, H, A)
-    p_bar = probs.mean(dim=1)                                      # (B, A)
+    feat  = extract_features(cnn, s)                              # (B, 3136)
+    q_all = torch.stack(
+        [q_values_all_actions(h, feat) for h in critics], dim=1
+    )                                                              # (B, H, A)
+    probs = F.softmax(q_all, dim=-1)                              # (B, H, A)
+    p_bar = probs.mean(dim=1)                                     # (B, A)
     eps   = 1e-12
     H_num = len(critics)
     A     = q_all.size(-1)
 
-    h_total = -(p_bar * (p_bar + eps).log()).sum(dim=-1)           # (B,)
-    h_heads = -(probs  * (probs  + eps).log()).sum(dim=-1)         # (B, H)
-    h_alea  = h_heads.mean(dim=1)                                  # (B,)
-    h_epi   = h_total - h_alea                                     # (B,)
+    h_total = -(p_bar * (p_bar + eps).log()).sum(dim=-1)
+    h_heads = -(probs  * (probs  + eps).log()).sum(dim=-1)
+    h_alea  = h_heads.mean(dim=1)
+    h_epi   = h_total - h_alea
 
-    # Vote entropy + agreement
-    top_acts = q_all.argmax(dim=-1)                                # (B, H)
+    top_acts = q_all.argmax(dim=-1)                               # (B, H)
     vote_cnt = torch.zeros(len(s), A, device=device)
     vote_cnt.scatter_add_(1, top_acts,
                            torch.ones_like(top_acts, dtype=torch.float))
     vote_p   = vote_cnt / H_num
-    vote_ent = -(vote_p * (vote_p + eps).log()).sum(dim=-1)        # (B,)
-    agreement= vote_p.max(dim=-1).values                           # (B,)
+    vote_ent = -(vote_p * (vote_p + eps).log()).sum(dim=-1)
+    agreement= vote_p.max(dim=-1).values
 
-    # Pairwise JS — numerically stable via log differences
     pairs_js = []
     for i in range(H_num):
         for j in range(i + 1, H_num):
@@ -430,11 +574,10 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
                 (p_j * ((p_j + eps).log() - (m + eps).log())).sum(-1)
             )
             pairs_js.append(js)
-    pairwise_js = torch.stack(pairs_js, dim=1).mean(dim=1)         # (B,)
+    pairwise_js = torch.stack(pairs_js, dim=1).mean(dim=1)
 
-    # Actor policy entropy
     actor_probs, actor_log = actor(feat)
-    actor_ent = -(actor_probs * actor_log).sum(dim=-1)             # (B,)
+    actor_ent = -(actor_probs * actor_log).sum(dim=-1)
 
     def _stats(t, name):
         t = t.cpu().float()
@@ -442,7 +585,7 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
         print(f'  {name:<28s}: mean={t.mean():.4f}  std={t.std():.4f}  '
               f'p50={q[0]:.4f}  p90={q[1]:.4f}  p95={q[2]:.4f}')
 
-    print(f'  [Eval {len(s):,} states | max H={np.log(A):.4f}]')
+    print(f'  [Uncertainty | {len(s):,} states | max H={np.log(A):.4f}]')
     _stats(h_total,     'total entropy')
     _stats(h_alea,      'aleatoric')
     _stats(h_epi,       'epistemic')
@@ -451,6 +594,53 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     _stats(pairwise_js, 'pairwise JS')
     _stats(actor_ent,   'actor policy entropy')
 
+    return pairwise_js.mean().item()
+
+
+# ── Action alignment diagnostics ─────────────────────────────────────────────
+
+@torch.no_grad()
+def evaluate_action_alignment(cnn, actor: Actor,
+                               dataset: OfflineDataset,
+                               device: str, n_eval: int = 20_000):
+    """
+    Measures how well the actor's policy aligns with the human offline data.
+    This is the primary indicator that the ensemble is operating near the
+    human trajectory manifold — a prerequisite for meaningful uncertainty.
+    """
+    rng = np.random.default_rng(0)
+    idx = rng.choice(dataset.N, min(n_eval, dataset.N), replace=False)
+
+    s = torch.from_numpy(dataset.states[idx].astype(np.float32) / 255.0).to(device)
+    a = torch.from_numpy(dataset.actions[idx]).long().to(device)
+
+    feat            = extract_features(cnn, s)
+    probs, log_probs = actor(feat)
+
+    pred       = probs.argmax(dim=-1)
+    acc        = (pred == a).float().mean().item()
+    ce         = F.nll_loss(log_probs, a).item()
+    human_prob = probs[torch.arange(len(a), device=device), a].mean().item()
+    entropy    = -(probs * log_probs).sum(dim=-1).mean().item()
+
+    print(f'  [Action alignment | {len(a):,} states]')
+    print(f'    acc         = {acc:.4f}')
+    print(f'    CE          = {ce:.4f}')
+    print(f'    P(human a)  = {human_prob:.4f}')
+    print(f'    actor H     = {entropy:.4f}')
+
+
+# ── Game evaluation ───────────────────────────────────────────────────────────
+
+def evaluate_game(cnn, actor: Actor, n_actions: int,
+                   env_name: str, device, num_episodes: int,
+                   seed: int, deterministic: bool) -> dict:
+    """Run game episodes via eval.evaluate_agent and return reward stats."""
+    from eval import evaluate_agent as _eval_agent
+    agent = EDACAgent(cnn, actor, n_actions, device)
+    agent.eval()
+    return _eval_agent(agent, env_name, device, num_episodes, seed, deterministic)
+
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
@@ -458,6 +648,12 @@ def train(args):
     set_seed(args.seed)
     device = args.device
     rng    = np.random.default_rng(args.seed)
+    A      = 6   # Atari discrete action space
+
+    # ── Save directory (mirrors main.py: save_dir/algo/subject/) ──────────────
+    save_dir = Path(args.save_dir) / 'edac' / args.subject
+    save_dir.mkdir(parents=True, exist_ok=True)
+    print(f'Models will be saved to: {save_dir}')
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print(f'\n[Data] {args.subject}  files={args.file_idx}')
@@ -470,18 +666,17 @@ def train(args):
     )
 
     # ── Models ────────────────────────────────────────────────────────────────
-    A = 6  # Atari action space size
     print(f'\n[Model] CNN: {args.dqn_path}')
     cnn = load_dqn(args.dqn_path)
     cnn.to(device).eval()
     if args.freeze_cnn:
-        for p_param in cnn.parameters():
-            p_param.requires_grad_(False)
+        for p in cnn.parameters():
+            p.requires_grad_(False)
 
-    critics        = build_critics(args.num_heads).to(device)
+    critics        = build_critics(args.num_heads, n_actions=A).to(device)
     target_critics = copy.deepcopy(critics).to(device)
-    for p_param in target_critics.parameters():
-        p_param.requires_grad_(False)
+    for p in target_critics.parameters():
+        p.requires_grad_(False)
 
     actor = Actor(n_actions=A).to(device)
 
@@ -492,7 +687,6 @@ def train(args):
     critic_opt = torch.optim.Adam(critic_params, lr=args.lr)
     actor_opt  = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
 
-    # Alpha (entropy temperature)
     alpha = args.alpha
     log_alpha = alpha_opt = None
     if args.learn_alpha:
@@ -509,16 +703,17 @@ def train(args):
 
     print(f'\n[Train] epochs={args.epochs}  iters/epoch={iters_per_epoch}')
     print(f'        div={args.div_type}  λ_div={args.lambda_div}'
-          f'  α={alpha:.3f}  learn_α={args.learn_alpha}'
-          f'  q_pessimism={args.q_pessimism}')
-    print(f'        device={device}  freeze_cnn={args.freeze_cnn}\n')
+          f'  α={alpha:.3f}  learn_α={args.learn_alpha}')
+    print(f'        q_pessimism={args.q_pessimism}'
+          f'  device={device}  freeze_cnn={args.freeze_cnn}')
+    print('=' * 80)
 
-    for epoch in tqdm(range(1, args.epochs + 1)):
+    for epoch in tqdm(range(1, args.epochs + 1), desc='Training', unit='epoch'):
         critics.train(); actor.train()
         if not args.freeze_cnn:
             cnn.train()
 
-        log = dict(td=[], div=[], actor=[], alpha=[], policy_ent=[], q_mean=[])
+        log = dict(td=[], div=[], actor=[], alpha_loss=[], policy_ent=[], q_mean=[])
 
         for _ in range(iters_per_epoch):
             if args.learn_alpha:
@@ -530,27 +725,30 @@ def train(args):
 
             for h in range(args.num_heads):
                 s, a, r, ns, d = sample_batch(dataset, heads_idx[h],
-                                              args.batch_size, device)
-                feat_fn = (extract_features if args.freeze_cnn
-                           else extract_features_grad)
+                                               args.batch_size, device)
+                feat_fn = extract_features if args.freeze_cnn else extract_features_grad
                 feat_s  = feat_fn(cnn, s)
                 feat_ns = feat_fn(cnn, ns)
 
                 td = compute_critic_loss(
                     critics[h], target_critics, actor,
                     feat_s, feat_ns, a, r, d,
-                    args.gamma, alpha,
+                    args.gamma, alpha, n_actions=A,
                 )
                 td_sum = td_sum + td
                 feat_s_list.append(feat_s.detach())
-                log['q_mean'].append(critics[h](feat_s.detach()).detach().mean().item())
 
-            td_mean = td_sum / args.num_heads
+                with torch.no_grad():
+                    q_mean_val = q_values_all_actions(
+                        critics[h], feat_s.detach()
+                    ).mean().item()
+                log['q_mean'].append(q_mean_val)
 
-            # Diversity loss on concatenated features from all heads
-            feat_div = torch.cat(feat_s_list, dim=0)               # (H*B, 3136)
+            td_mean  = td_sum / args.num_heads
+            feat_div = torch.cat(feat_s_list, dim=0)   # (H*B, 3136)
+
             div_loss = compute_diversity_loss(
-                critics, feat_div,
+                critics, feat_div, actor, A,
                 args.div_type, args.div_tau, args.target_js,
             )
 
@@ -558,13 +756,13 @@ def train(args):
             critic_opt.zero_grad()
             critic_loss.backward()
             nn.utils.clip_grad_norm_(
-                [p for p in critic_opt.param_groups[0]['params'] if p.requires_grad],
+                [p for g in critic_opt.param_groups for p in g['params']
+                 if p.requires_grad],
                 args.grad_clip,
             )
             critic_opt.step()
 
             # ── Actor update ───────────────────────────────────────────────
-            # Use a fresh global batch (avoids coupling with critic bootstrap)
             s_global   = sample_global_batch(dataset, args.batch_size, device)
             feat_actor = (extract_features(cnn, s_global) if args.freeze_cnn
                           else extract_features_grad(cnn, s_global))
@@ -582,68 +780,90 @@ def train(args):
             if args.learn_alpha:
                 with torch.no_grad():
                     probs_a, log_probs_a = actor(feat_actor)
-                a_loss = compute_alpha_loss(log_alpha, probs_a, log_probs_a,
-                                            target_entropy)
+                al = compute_alpha_loss(log_alpha, probs_a, log_probs_a, target_entropy)
                 alpha_opt.zero_grad()
-                a_loss.backward()
+                al.backward()
                 alpha_opt.step()
-                alpha_loss_val = a_loss.item()
+                alpha_loss_val = al.item()
                 alpha = log_alpha.exp().item()
 
-            # ── Target update ──────────────────────────────────────────────
+            # ── Hard target copy ───────────────────────────────────────────
             global_step += 1
-            if global_step % args.target_update_interval == 0:
+            if global_step % args.target_update_freq == 0:
                 target_critics.load_state_dict(critics.state_dict())
 
             log['td'].append(td_mean.item())
             log['div'].append(div_loss.item())
             log['actor'].append(actor_loss.item())
-            log['alpha'].append(alpha_loss_val)
+            log['alpha_loss'].append(alpha_loss_val)
             log['policy_ent'].append(policy_ent)
 
-        # ── Epoch diagnostics ──────────────────────────────────────────────
+        # ── Epoch summary ──────────────────────────────────────────────────
         critics.eval(); actor.eval()
-        print(f'Epoch {epoch:3d}/{args.epochs}  '
-              f'td={np.mean(log["td"]):.4f}  '
-              f'div={np.mean(log["div"]):.6f}  '
-              f'actor={np.mean(log["actor"]):.4f}  '
-              f'α={alpha:.4f}  '
-              f'H_π={np.mean(log["policy_ent"]):.4f}  '
-              f'Q_mean={np.mean(log["q_mean"]):.3f}')
+        tqdm.write(
+            f'Epoch {epoch:3d}/{args.epochs}  '
+            f'td={np.mean(log["td"]):.4f}  '
+            f'div={np.mean(log["div"]):.6f}  '
+            f'actor={np.mean(log["actor"]):.4f}  '
+            f'α={alpha:.4f}  '
+            f'H_π={np.mean(log["policy_ent"]):.4f}  '
+            f'Q_mean={np.mean(log["q_mean"]):.3f}'
+        )
+
         evaluate_uncertainty(critics, actor, cnn, dataset, device)
+        if args.div_type == 'edac_grad':
+            tqdm.write(f'  edac_grad_diversity (last iter) = {log["div"][-1]:.6f}')
+        evaluate_action_alignment(cnn, actor, dataset, device)
 
-        if args.save_every > 0 and epoch % args.save_every == 0:
-            ckpt = Path(args.out_path).with_suffix(f'.epoch{epoch:03d}.pth')
-            ckpt.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(critics.state_dict(), ckpt)
-            print(f'  Checkpoint -> {ckpt}')
+        # ── Game evaluation (aligned with main.py eval_interval) ──────────
+        if epoch % args.eval_interval == 0:
+            tqdm.write(f"\n{'='*80}")
+            tqdm.write(f'EVALUATION at Epoch {epoch}')
+            tqdm.write(f"{'='*80}")
+            eval_stats = evaluate_game(
+                cnn, actor, A, args.env_name, device,
+                args.eval_episodes, args.seed + epoch, args.deterministic,
+            )
+            tqdm.write(
+                f"  Eval - Mean Reward: {eval_stats['mean_reward']:.2f}"
+                f" ± {eval_stats['std_reward']:.2f}\n"
+                f"         Min: {eval_stats['min_reward']:.1f},"
+                f" Max: {eval_stats['max_reward']:.1f}\n"
+                f"         Mean Length: {eval_stats['mean_length']:.1f}"
+            )
+            tqdm.write(f"{'='*80}\n")
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    out_path = Path(args.out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(critics.state_dict(), out_path)
-    print(f'\n[Done] Critics saved -> {out_path}')
+        # ── Checkpoint (aligned with main.py save_interval) ───────────────
+        if epoch % args.save_interval == 0:
+            safe_save(critics.state_dict(), save_dir / f'epoch_{epoch:03d}_critics.pth')
+            safe_save(actor.state_dict(),   save_dir / f'epoch_{epoch:03d}_actor.pth')
+            tqdm.write(f'  Saved checkpoint -> {save_dir}/epoch_{epoch:03d}_*.pth')
 
-    actor_path = out_path.with_stem(out_path.stem + '_actor')
-    torch.save(actor.state_dict(), actor_path)
-    print(f'       Actor  saved -> {actor_path}')
+    # ── Final save ────────────────────────────────────────────────────────────
+    safe_save(critics.state_dict(), save_dir / 'critics_final.pth')
+    safe_save(actor.state_dict(),   save_dir / 'actor_final.pth')
+    print(f'\n[Done] Critics -> {save_dir}/critics_final.pth')
+    print(f'       Actor   -> {save_dir}/actor_final.pth')
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     args = get_args()
-    print('=' * 60)
+    print('=' * 80)
     print('EDAC Ensemble Offline Actor-Critic')
     print(f'  Subject     : {args.subject}')
+    print(f'  Data dir    : {args.data_dir}')
+    print(f'  Save dir    : {args.save_dir}/edac/{args.subject}/')
     print(f'  Heads       : {args.num_heads}')
     print(f'  Epochs      : {args.epochs}')
     print(f'  Diversity   : {args.div_type}  λ={args.lambda_div}')
     print(f'  Bootstrap   : {args.bootstrap_mode}  frac={args.bootstrap_frac}')
     print(f'  Alpha       : {args.alpha}  learn={args.learn_alpha}')
     print(f'  Q pessimism : {args.q_pessimism}')
+    print(f'  Env         : {args.env_name}  episodes={args.eval_episodes}')
     print(f'  Device      : {args.device}')
-    print('=' * 60)
+    print('=' * 80)
     train(args)
 
 
