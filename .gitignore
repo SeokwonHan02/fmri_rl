@@ -4,7 +4,6 @@ __pycache__/
 pretrained/
 processed_data_frameskip_4/
 
-utils.py
 process_game2_data_fixed.py
 render_episodes/
 analyze_action_distribution.py
