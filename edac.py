@@ -36,8 +36,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from glm_utils import load_dqn
-
 _ROOT = Path(__file__).parent
 
 
@@ -106,6 +104,29 @@ def set_seed(seed: int):
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
+
+def load_dqn(dqn_path: str):
+    """
+    Load DQN (conv + fc3 + fc_out) from checkpoint. Returns model in eval mode on CPU.
+    Supports checkpoints storing state_dict directly or under 'policy_net'.
+    """
+    import sys
+    import torch
+    sys.path.insert(0, str(_ROOT))
+    from model.dqn import DQN
+
+    model = DQN(action_dim=6)
+    try:
+        from utils import robust_torch_load
+        ckpt = robust_torch_load(dqn_path, map_location='cpu')
+    except Exception:
+        ckpt = torch.load(dqn_path, map_location='cpu')
+
+    state_dict = ckpt.get('policy_net', ckpt)
+    model.load_state_dict(state_dict)
+    model.eval()
+    print(f'  DQN loaded: {dqn_path}')
+    return model
 
 class OfflineDataset:
     """Offline transitions. No cross-run boundary transitions."""
