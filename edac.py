@@ -31,7 +31,7 @@ import copy
 import glob
 import random
 from pathlib import Path
-from tqdm import tqdm
+import sys
 
 import numpy as np
 import torch
@@ -182,7 +182,7 @@ def load_offline_transitions(data_dir: str, subject: str,
 
     for run_id, fidx in enumerate(file_idx):
         if fidx < 0 or fidx >= len(npz_files):
-            print(f'  WARNING: file_idx {fidx} out of range, skip')
+            print(f'  WARNING: file_idx {fidx} out of range, skip', flush=True)
             continue
         data   = np.load(npz_files[fidx])
         states = data['state']
@@ -200,7 +200,7 @@ def load_offline_transitions(data_dir: str, subject: str,
         all_a.append(acts[:-1]);    all_r.append(rews[:-1])
         all_d.append(d)
         all_rid.append(np.full(T - 1, run_id, dtype=np.int32))
-        print(f'  run {run_id} (f{fidx}): {T:,} frames → {T-1:,} transitions')
+        print(f'  run {run_id} (f{fidx}): {T:,} frames → {T-1:,} transitions', flush=True)
 
     ds = OfflineDataset(
         states      = np.concatenate(all_s),
@@ -210,7 +210,7 @@ def load_offline_transitions(data_dir: str, subject: str,
         dones       = np.concatenate(all_d),
         run_ids     = np.concatenate(all_rid),
     )
-    print(f'  Total transitions: {ds.N:,}')
+    print(f'  Total transitions: {ds.N:,}', flush=True)
     return ds
 
 
@@ -529,6 +529,7 @@ def compute_diversity_loss(critics: nn.ModuleList,
 # ── Uncertainty diagnostics ───────────────────────────────────────────────────
 
 @torch.no_grad()
+
 def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
                           cnn, dataset: OfflineDataset,
                           device: str, n_eval: int = 10_000) -> float:
@@ -540,12 +541,12 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     idx = rng.choice(dataset.N, min(n_eval, dataset.N), replace=False)
     s   = torch.from_numpy(dataset.states[idx].astype(np.float32) / 255.0).to(device)
 
-    feat  = extract_features(cnn, s)                              # (B, 3136)
+    feat  = extract_features(cnn, s)
     q_all = torch.stack(
         [q_values_all_actions(h, feat) for h in critics], dim=1
     )                                                              # (B, H, A)
-    probs = F.softmax(q_all, dim=-1)                              # (B, H, A)
-    p_bar = probs.mean(dim=1)                                     # (B, A)
+    probs = F.softmax(q_all, dim=-1)                               # (B, H, A)
+    p_bar = probs.mean(dim=1)                                      # (B, A)
     eps   = 1e-12
     H_num = len(critics)
     A     = q_all.size(-1)
@@ -555,13 +556,13 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     h_alea  = h_heads.mean(dim=1)
     h_epi   = h_total - h_alea
 
-    top_acts = q_all.argmax(dim=-1)                               # (B, H)
+    top_acts = q_all.argmax(dim=-1)
     vote_cnt = torch.zeros(len(s), A, device=device)
     vote_cnt.scatter_add_(1, top_acts,
                            torch.ones_like(top_acts, dtype=torch.float))
-    vote_p   = vote_cnt / H_num
-    vote_ent = -(vote_p * (vote_p + eps).log()).sum(dim=-1)
-    agreement= vote_p.max(dim=-1).values
+    vote_p    = vote_cnt / H_num
+    vote_ent  = -(vote_p * (vote_p + eps).log()).sum(dim=-1)
+    agreement = vote_p.max(dim=-1).values
 
     pairs_js = []
     for i in range(H_num):
@@ -580,12 +581,15 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     actor_ent = -(actor_probs * actor_log).sum(dim=-1)
 
     def _stats(t, name):
-        t = t.cpu().float()
+        t = t.detach().cpu().float()
         q = torch.quantile(t, torch.tensor([.5, .9, .95]))
-        print(f'  {name:<28s}: mean={t.mean():.4f}  std={t.std():.4f}  '
-              f'p50={q[0]:.4f}  p90={q[1]:.4f}  p95={q[2]:.4f}')
+        print(
+            f'  {name:<28s}: mean={t.mean():.4f}  std={t.std():.4f}  '
+            f'p50={q[0]:.4f}  p90={q[1]:.4f}  p95={q[2]:.4f}',
+            flush=True
+        )
 
-    print(f'  [Uncertainty | {len(s):,} states | max H={np.log(A):.4f}]')
+    print(f'  [Uncertainty | {len(s):,} states | max H={np.log(A):.4f}]', flush=True)
     _stats(h_total,     'total entropy')
     _stats(h_alea,      'aleatoric')
     _stats(h_epi,       'epistemic')
@@ -593,7 +597,6 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     _stats(agreement,   'agreement')
     _stats(pairwise_js, 'pairwise JS')
     _stats(actor_ent,   'actor policy entropy')
-
     return pairwise_js.mean().item()
 
 
@@ -708,7 +711,10 @@ def train(args):
           f'  device={device}  freeze_cnn={args.freeze_cnn}')
     print('=' * 80)
 
-    for epoch in tqdm(range(1, args.epochs + 1), desc='Training', unit='epoch'):
+    for epoch in range(1, args.epochs + 1):
+        print(f'\n{"="*80}', flush=True)
+        print(f'[Epoch {epoch}/{args.epochs}] start', flush=True)
+        
         critics.train(); actor.train()
         if not args.freeze_cnn:
             cnn.train()
@@ -800,44 +806,46 @@ def train(args):
 
         # ── Epoch summary ──────────────────────────────────────────────────
         critics.eval(); actor.eval()
-        tqdm.write(
+        print(
             f'Epoch {epoch:3d}/{args.epochs}  '
             f'td={np.mean(log["td"]):.4f}  '
             f'div={np.mean(log["div"]):.6f}  '
             f'actor={np.mean(log["actor"]):.4f}  '
             f'α={alpha:.4f}  '
             f'H_π={np.mean(log["policy_ent"]):.4f}  '
-            f'Q_mean={np.mean(log["q_mean"]):.3f}'
+            f'Q_mean={np.mean(log["q_mean"]):.3f}',
+            flush = True
         )
 
         evaluate_uncertainty(critics, actor, cnn, dataset, device)
         if args.div_type == 'edac_grad':
-            tqdm.write(f'  edac_grad_diversity (last iter) = {log["div"][-1]:.6f}')
+            print(f'  edac_grad_diversity (last iter) = {log["div"][-1]:.6f}', flush = True)
         evaluate_action_alignment(cnn, actor, dataset, device)
 
         # ── Game evaluation (aligned with main.py eval_interval) ──────────
         if epoch % args.eval_interval == 0:
-            tqdm.write(f"\n{'='*80}")
-            tqdm.write(f'EVALUATION at Epoch {epoch}')
-            tqdm.write(f"{'='*80}")
+            print(f"\n{'='*80}", flush = True)
+            print(f'EVALUATION at Epoch {epoch}', flush = True)
+            print(f"{'='*80}", flush = True)
             eval_stats = evaluate_game(
                 cnn, actor, A, args.env_name, device,
                 args.eval_episodes, args.seed + epoch, args.deterministic,
             )
-            tqdm.write(
+            print(
                 f"  Eval - Mean Reward: {eval_stats['mean_reward']:.2f}"
                 f" ± {eval_stats['std_reward']:.2f}\n"
                 f"         Min: {eval_stats['min_reward']:.1f},"
                 f" Max: {eval_stats['max_reward']:.1f}\n"
-                f"         Mean Length: {eval_stats['mean_length']:.1f}"
+                f"         Mean Length: {eval_stats['mean_length']:.1f}",
+                flush = True
             )
-            tqdm.write(f"{'='*80}\n")
+            print(f"{'='*80}\n", flush = True)
 
         # ── Checkpoint (aligned with main.py save_interval) ───────────────
         if epoch % args.save_interval == 0:
             safe_save(critics.state_dict(), save_dir / f'epoch_{epoch:03d}_critics.pth')
             safe_save(actor.state_dict(),   save_dir / f'epoch_{epoch:03d}_actor.pth')
-            tqdm.write(f'  Saved checkpoint -> {save_dir}/epoch_{epoch:03d}_*.pth')
+            print(f'  Saved checkpoint -> {save_dir}/epoch_{epoch:03d}_*.pth', flush = True)
 
     # ── Final save ────────────────────────────────────────────────────────────
     safe_save(critics.state_dict(), save_dir / 'critics_final.pth')
