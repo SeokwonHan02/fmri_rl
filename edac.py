@@ -12,7 +12,7 @@ Architecture:
   - Actor  : π(a|s) = softmax(Linear(3136→512)→ReLU→Linear(512→A))
   - Critics: H independent action-conditioned heads Q(s,a) = MLP([feat ‖ a_soft] → 1)
   - CNN    : shared frozen backbone from pretrained DQN
-  - Target : hard-copy of critics; no target actor needed (discrete SAC)
+  - Target : soft update τ·θ + (1−τ)·θ_target each step; no target actor needed
 
 Training:
   - Critic : SAC-discrete with ensemble-minimum target
@@ -89,8 +89,8 @@ def get_args():
                    help='Critic learning rate')
     p.add_argument('--actor-lr',    type=float, default=1e-4)
     p.add_argument('--gamma',       type=float, default=0.99)
-    p.add_argument('--target-update-freq', type=int, default=1000,
-                   help='Hard target copy interval (steps); aligned with main.py')
+    p.add_argument('--tau',               type=float, default=0.005,
+                   help='Soft target update coefficient (Polyak: θ_target ← τθ + (1−τ)θ_target)')
     p.add_argument('--iters-per-epoch', type=int, default=0,
                    help='0 = auto (min_head_len // batch_size)')
 
@@ -702,12 +702,11 @@ def train(args):
     min_head_len    = min(len(i) for i in heads_idx)
     iters_per_epoch = (args.iters_per_epoch if args.iters_per_epoch > 0
                        else max(1, min_head_len // args.batch_size))
-    global_step     = 0
 
     print(f'\n[Train] epochs={args.epochs}  iters/epoch={iters_per_epoch}')
     print(f'        div={args.div_type}  λ_div={args.lambda_div}'
           f'  α={alpha:.3f}  learn_α={args.learn_alpha}')
-    print(f'        q_pessimism={args.q_pessimism}'
+    print(f'        q_pessimism={args.q_pessimism}  τ={args.tau}'
           f'  device={device}  freeze_cnn={args.freeze_cnn}')
     print('=' * 80)
 
@@ -793,10 +792,11 @@ def train(args):
                 alpha_loss_val = al.item()
                 alpha = log_alpha.exp().item()
 
-            # ── Hard target copy ───────────────────────────────────────────
-            global_step += 1
-            if global_step % args.target_update_freq == 0:
-                target_critics.load_state_dict(critics.state_dict())
+            # ── Soft target update (Polyak) ────────────────────────────────
+            with torch.no_grad():
+                for p_tgt, p_src in zip(target_critics.parameters(),
+                                         critics.parameters()):
+                    p_tgt.data.mul_(1.0 - args.tau).add_(args.tau * p_src.data)
 
             log['td'].append(td_mean.item())
             log['div'].append(div_loss.item())
