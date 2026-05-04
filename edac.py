@@ -119,6 +119,8 @@ def get_args():
                    help='Target JS for policy_js diversity')
     p.add_argument('--div-tau',     type=float, default=1.0,
                    help='Softmax temperature for policy_js diversity')
+    p.add_argument('--tau-unc',     type=float, default=1.0,
+                   help='Softmax temperature for uncertainty metrics  p = softmax(Q / tau_unc)')
 
     # Misc (aligned with main.py)
     p.add_argument('--grad-clip',   type=float, default=10.0)
@@ -532,10 +534,12 @@ def compute_diversity_loss(critics: nn.ModuleList,
 
 def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
                           cnn, dataset: OfflineDataset,
-                          device: str, n_eval: int = 10_000) -> float:
+                          device: str, n_eval: int = 10_000,
+                          tau_unc: float = 1.0) -> float:
     """
     Print per-metric uncertainty statistics and return mean pairwise JS.
     Uses q_values_all_actions to build q_all (B, H, A) from action-conditioned critics.
+    tau_unc : softmax temperature for all entropy/JS metrics (default 1.0 = no scaling).
     """
     rng = np.random.default_rng(0)
     idx = rng.choice(dataset.N, min(n_eval, dataset.N), replace=False)
@@ -544,8 +548,44 @@ def evaluate_uncertainty(critics: nn.ModuleList, actor: Actor,
     feat  = extract_features(cnn, s)
     q_all = torch.stack(
         [q_values_all_actions(h, feat) for h in critics], dim=1
-    )                                                              # (B, H, A)
-    probs = F.softmax(q_all, dim=-1)                               # (B, H, A)
+    )
+    
+    q_cpu = q_all.detach().cpu().float()  # (B, H, A)
+
+    # action-wise gap within each head
+    top2 = q_cpu.topk(2, dim=-1).values
+    q_gap = top2[:, :, 0] - top2[:, :, 1]
+
+    # state-wise action range
+    q_range = q_cpu.max(dim=-1).values - q_cpu.min(dim=-1).values
+
+    # head disagreement per action
+    q_head_std = q_cpu.std(dim=1).mean(dim=-1)  # (B,)
+
+    print(
+        f'  Q diagnostics: mean={q_cpu.mean():.4f} std={q_cpu.std():.4f} '
+        f'min={q_cpu.min():.4f} max={q_cpu.max():.4f}',
+        flush=True
+    )
+    print(
+        f'  Q action gap: top1-top2 mean={q_gap.mean():.4f} '
+        f'p90={torch.quantile(q_gap.flatten(), 0.90):.4f} '
+        f'p95={torch.quantile(q_gap.flatten(), 0.95):.4f}',
+        flush=True
+    )
+    print(
+        f'  Q action range: mean={q_range.mean():.4f} '
+        f'p90={torch.quantile(q_range.flatten(), 0.90):.4f} '
+        f'p95={torch.quantile(q_range.flatten(), 0.95):.4f}',
+        flush=True
+    )
+    print(
+        f'  Q head disagreement: mean_head_std={q_head_std.mean():.4f} '
+        f'p90={torch.quantile(q_head_std, 0.90):.4f}',
+        flush=True
+    )
+                                                                  # (B, H, A)
+    probs = F.softmax(q_all / tau_unc, dim=-1)                     # (B, H, A)
     p_bar = probs.mean(dim=1)                                      # (B, A)
     eps   = 1e-12
     H_num = len(critics)
@@ -817,7 +857,7 @@ def train(args):
             flush = True
         )
 
-        evaluate_uncertainty(critics, actor, cnn, dataset, device)
+        evaluate_uncertainty(critics, actor, cnn, dataset, device, tau_unc=args.tau_unc)
         if args.div_type == 'edac_grad':
             print(f'  edac_grad_diversity (last iter) = {log["div"][-1]:.6f}', flush = True)
         evaluate_action_alignment(cnn, actor, dataset, device)
