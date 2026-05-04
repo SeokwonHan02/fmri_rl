@@ -13,7 +13,6 @@ rsa_*/
 logs/
 rsa_dqn_vs_bc.py
 rsa_dqn_vs_cql.py
-glm_utils.py
 entropy_*/
 analyze_*.py
 uncertainty_*/

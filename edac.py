@@ -29,6 +29,7 @@ import copy
 import glob
 import random
 from pathlib import Path
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -77,7 +78,7 @@ def get_args():
     p.add_argument('--target_entropy', type=float, default=None,
                    help='Target policy entropy. Default: -ln(1/A) * 0.5')
     # Actor Q pessimism
-    p.add_argument('--q_pessimism', choices=['mean','min'], default='mean',
+    p.add_argument('--q_pessimism', choices=['mean','min'], default='min',
                    help='Q aggregation for actor update (min = conservative)')
     # Diversity
     p.add_argument('--div_type',    choices=['advantage_orthogonal','policy_js','none'],
@@ -490,7 +491,7 @@ def train(args):
           f'  q_pessimism={args.q_pessimism}')
     print(f'        device={device}  freeze_cnn={args.freeze_cnn}\n')
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in tqdm(range(1, args.epochs + 1)):
         critics.train(); actor.train()
         if not args.freeze_cnn:
             cnn.train()
