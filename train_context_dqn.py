@@ -8,17 +8,18 @@ pretrained/dqn_cnn.pt and eval.py so that checkpoints are interchangeable.
 ──────────────────────────────────────────────────────────────────────────────
 Quick start
 ──────────────────────────────────────────────────────────────────────────────
-# Offense DQN with MC biased-rollout risk detector:
-python train_dqn.py \
+# Offense DQN with MC biased-rollout risk detector (delayed-life window):
+python train_context_dqn.py \
     --mode offense \
     --expert_checkpoint pretrained/dqn_cnn.pt \
-    --save_dir checkpoints/offense_mc_biased \
+    --save_dir checkpoints/offense_mc_biased_delay \
     --use_mc_risk_detector \
     --mc_risk_group_size 8 \
-    --mc_risk_horizon_steps 30 \
+    --mc_risk_horizon_steps 45 \
     --mc_risk_eval_interval_frames 80 \
     --mc_risk_threshold 0.5 \
-    --mc_risk_num_workers 0
+    --mc_risk_hit_life_delay_frames 120 \
+    --mc_risk_action_window_frames 50
 
 # Offense DQN with random rescue fallback (no MC detector):
 python train_dqn.py \
@@ -258,35 +259,81 @@ class MCRiskDetector:
     """
     Monte Carlo biased-rollout death-risk estimator for offense DQN training.
 
+    Risk definition (delayed-life window)
+    ──────────────────────────────────────
+    In Space Invaders, when the player is hit by a bullet the ALE life counter
+    decreases ~120 raw frames later.  A rollout that detects a life loss before
+    that delay has elapsed was almost certainly hit *before* the rollout started
+    (pending death), not by the rollout's own actions.
+
+    We therefore define a risk event as:
+
+        life count decreases within [risk_min_frame, risk_max_frame]
+
+    where:
+        risk_min_frame = hit_life_delay_frames
+        risk_max_frame = hit_life_delay_frames + action_window_frames
+
+    Any life loss before risk_min_frame is treated as a pre-existing hit → 0.
+    Any life loss after risk_max_frame is too distant to be imminent → 0.
+
     Parameters
     ----------
-    env_id          : Gymnasium / ALE environment ID (same as training env).
-    horizon_steps   : Rollout length in decision steps (default 30).
-    frame_skip      : Raw frames per decision step (default 4, matches training).
-    screen_size     : Resize target for manual preprocessing (default 84).
-    n_stack         : Frame stack depth (default 4).
-    num_workers     : Reserved for future parallel rollouts; currently ignored.
-    seed            : RNG seed for the raw risk env.
-    group_size      : Rollouts per policy group; total N = 3 × group_size.
+    env_id                : Gymnasium / ALE environment ID.
+    horizon_steps         : Rollout length in decision steps (default 45).
+    frame_skip            : Raw frames per decision step (default 4).
+    screen_size           : Resize target for manual preprocessing (default 84).
+    n_stack               : Frame stack depth (default 4).
+    num_workers           : Reserved for future parallel rollouts; ignored.
+    seed                  : RNG seed for the raw risk env.
+    group_size            : Rollouts per policy group; total N = 3 × group_size.
+    hit_life_delay_frames : Raw frames between a hit and the resulting life-loss
+                            in ALE (default 120 for Space Invaders).
+    action_window_frames  : Width of the causal window — only hits that occur
+                            within this many frames of rollout start are counted
+                            as risk events (default 50).
     """
 
     def __init__(
         self,
         env_id: str,
-        horizon_steps: int = 30,
+        horizon_steps: int = 45,
         frame_skip: int = 4,
         screen_size: int = 84,
         n_stack: int = 4,
         num_workers: int = 0,
         seed: int = 0,
         group_size: int = 8,
+        hit_life_delay_frames: int = 120,
+        action_window_frames: int = 50,
     ):
-        self.horizon_steps = horizon_steps
-        self.frame_skip    = frame_skip
-        self.screen_size   = screen_size
-        self.n_stack       = n_stack
-        self.group_size    = group_size
-        self.n_rollouts    = 3 * group_size
+        self.horizon_steps        = horizon_steps
+        self.frame_skip           = frame_skip
+        self.screen_size          = screen_size
+        self.n_stack              = n_stack
+        self.group_size           = group_size
+        self.n_rollouts           = 3 * group_size
+        self.risk_min_frame       = hit_life_delay_frames
+        self.risk_max_frame       = hit_life_delay_frames + action_window_frames
+
+        required_raw = hit_life_delay_frames + action_window_frames
+        if horizon_steps * frame_skip < required_raw:
+            print(
+                f"[MCRisk] Warning: horizon_steps ({horizon_steps}) × frame_skip ({frame_skip}) "
+                f"= {horizon_steps * frame_skip} raw frames < "
+                f"hit_life_delay_frames + action_window_frames ({required_raw}). "
+                "Some risk events will be unreachable. "
+                "Consider increasing --mc_risk_horizon_steps."
+            )
+
+        print(
+            f"[MCRisk] Delayed-life window:\n"
+            f"         hit_life_delay_frames={hit_life_delay_frames}\n"
+            f"         action_window_frames={action_window_frames}\n"
+            f"         risk_event_window=[{self.risk_min_frame}, {self.risk_max_frame}]\n"
+            f"         horizon_steps={horizon_steps}\n"
+            f"         horizon_raw_frames={horizon_steps * frame_skip}"
+        )
 
         if num_workers > 1:
             print(
@@ -433,22 +480,34 @@ class MCRiskDetector:
         )
 
         # Step 4: rollout loop.
+        elapsed_raw_frames = 0
+
         for _ in range(self.horizon_steps):
             action = random.choices(self._acts, weights=weights, k=1)[0]
 
             # Manually apply frame_skip raw steps.
             for _ in range(self.frame_skip):
                 self._env.step(action)
-                if ale.lives() < start_lives:
-                    return 1       # life lost — risk event
-                if self._is_game_over(ale):
-                    return 1       # game over — risk event
+                elapsed_raw_frames += 1
+
+                if ale.lives() < start_lives or self._is_game_over(ale):
+                    # Risk event only if life loss falls within the causal window.
+                    # Before risk_min_frame: pending hit from before rollout start.
+                    # After risk_max_frame:  too distant to be imminent.
+                    if self.risk_min_frame <= elapsed_raw_frames <= self.risk_max_frame:
+                        return 1
+                    else:
+                        return 0
+
+                # Stop early once we're past the observation window.
+                if elapsed_raw_frames > self.risk_max_frame:
+                    return 0
 
             # Update frame stack after frame_skip steps.
             # (Consumed by neural-network rollout policies, not biased random.)
             frame_stack.append(self._get_frame())
 
-        return 0   # survived all horizon_steps without life loss
+        return 0   # no life loss in risk window across all horizon_steps
 
     # ── Public interface ───────────────────────────────────────────────────────
 
@@ -483,7 +542,7 @@ class MCRiskDetector:
         risk_left  = group_hits[0] / self.group_size
         risk_right = group_hits[1] / self.group_size
         risk_noop  = group_hits[2] / self.group_size
-        overall    = sum(group_hits) / self.n_rollouts
+        overall = max(risk_left, risk_right, risk_noop)
 
         elapsed = time.time() - t0
         if elapsed > 2.0:
@@ -611,26 +670,21 @@ def run_training(args) -> None:
     else:
         print("[Expert] No checkpoint provided — expert intervention disabled.")
 
-    # ── MC risk detector (offense mode only) ──────────────────────────────────
-    #
-    #   Created here, before the training loop, so the raw risk env and its
-    #   action mapping are resolved once at startup (not inside the hot loop).
-    #
-    #   The detector is only queried every mc_risk_eval_interval_steps decision
-    #   steps to avoid slowing down training; its result is cached between calls.
     mc_risk_detector = None
     mc_risk_eval_interval_steps = 0
 
     if args.mode == 'offense' and args.use_mc_risk_detector:
         mc_risk_detector = MCRiskDetector(
-            env_id        = args.env_id,
-            horizon_steps = args.mc_risk_horizon_steps,
-            frame_skip    = args.mc_risk_frame_skip,
-            screen_size   = 84,
-            n_stack       = 4,
-            num_workers   = args.mc_risk_num_workers,
-            seed          = args.seed,
-            group_size    = args.mc_risk_group_size,
+            env_id                = args.env_id,
+            horizon_steps         = args.mc_risk_horizon_steps,
+            frame_skip            = args.mc_risk_frame_skip,
+            screen_size           = 84,
+            n_stack               = 4,
+            num_workers           = args.mc_risk_num_workers,
+            seed                  = args.seed,
+            group_size            = args.mc_risk_group_size,
+            hit_life_delay_frames = args.mc_risk_hit_life_delay_frames,
+            action_window_frames  = args.mc_risk_action_window_frames,
         )
         mc_risk_eval_interval_steps = args.mc_risk_eval_interval_frames // FRAME_SKIP
         print(
@@ -734,7 +788,6 @@ def run_training(args) -> None:
             #   unusually safe position left by the expert.
 
             if expert_steps_remaining > 0:
-                # Intervention in progress.
                 expert_controlled       = True
                 expert_steps_remaining -= 1
                 if expert_steps_remaining == 0:
@@ -1073,8 +1126,9 @@ def parse_args():
     # ── MC biased-rollout risk detector ──────────────────────────────────────
     p.add_argument('--use_mc_risk_detector', action='store_true',
                    help='Enable MC biased-rollout death-risk detector for offense')
-    p.add_argument('--mc_risk_horizon_steps', type=int, default=30,
-                   help='Rollout length in decision steps')
+    p.add_argument('--mc_risk_horizon_steps', type=int, default=45,
+                   help='Rollout length in decision steps '
+                        '(default 45 = ceil(170/4); must cover hit_life_delay + action_window)')
     p.add_argument('--mc_risk_eval_interval_frames', type=int, default=80,
                    help='Raw env frames between MC risk evaluations '
                         '(80 frames = 20 decision steps)')
@@ -1086,6 +1140,14 @@ def parse_args():
                    help='Raw frames per decision step inside MC rollouts')
     p.add_argument('--mc_risk_group_size', type=int, default=8,
                    help='Rollouts per policy group; total N = 3 × group_size')
+    p.add_argument('--mc_risk_hit_life_delay_frames', type=int, default=120,
+                   help='Raw frames between a bullet hit and the ALE life-count decrease '
+                        '(~120 for Space Invaders); life losses before this are treated as '
+                        'pre-existing hits and do NOT count as risk events')
+    p.add_argument('--mc_risk_action_window_frames', type=int, default=50,
+                   help='Causal window width in raw frames; only hits that occur within '
+                        'this many frames of rollout start can cause a risk event '
+                        '(risk_max_frame = hit_life_delay + action_window; default 50)')
 
     # ── Checkpointing ─────────────────────────────────────────────────────────
     p.add_argument('--checkpoint_interval', type=int, default=1_000_000,
