@@ -985,7 +985,7 @@ def parse_args():
     # MC risk
     p.add_argument('--use_mc_risk_detector', action='store_true',
                    help='Run MC biased-rollout risk detector and display results')
-    p.add_argument('--mc_risk_horizon_steps',           type=int,   default=13,
+    p.add_argument('--mc_risk_horizon_steps',           type=int,   default=10,
                    help='Action probe horizon in decision steps '
                         '(action_window = horizon_steps × frame_skip; default 13 → 52 raw frames)')
     p.add_argument('--mc_risk_eval_interval_frames',    type=int,   default=80)

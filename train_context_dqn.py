@@ -703,7 +703,7 @@ def run_training(args) -> None:
     replay_buf = ReplayBuffer(args.buffer_size)
 
     # ── Initial environment state ─────────────────────────────────────────────
-    obs, info  = env.reset(seed=args.seed)
+    obs, info  = env.reset(seed=args.seed + ep_num)
     prev_lives = get_lives(env)
     prev_risk  = risk_fn(obs, info, env)   # only used in defense mode
 
@@ -1008,7 +1008,7 @@ def run_training(args) -> None:
             expert_steps_remaining   = 0
             cooldown_steps_remaining = 0
 
-            obs, info  = env.reset()
+            obs, info  = env.reset(seed=args.seed + ep_num)
             prev_lives = get_lives(env)
             prev_risk  = risk_fn(obs, info, env)
 
