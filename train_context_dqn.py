@@ -15,11 +15,10 @@ python train_context_dqn.py \
     --save_dir checkpoints/offense_mc_biased_delay \
     --use_mc_risk_detector \
     --mc_risk_group_size 8 \
-    --mc_risk_horizon_steps 45 \
+    --mc_risk_horizon_steps 13 \
     --mc_risk_eval_interval_frames 80 \
     --mc_risk_threshold 0.5 \
-    --mc_risk_hit_life_delay_frames 120 \
-    --mc_risk_action_window_frames 50
+    --mc_risk_hit_life_delay_frames 120
 
 # Offense DQN with random rescue fallback (no MC detector):
 python train_dqn.py \
@@ -51,7 +50,6 @@ import argparse
 import os
 import random
 import time
-from tqdm import tqdm
 from collections import deque
 
 import numpy as np
@@ -266,21 +264,28 @@ class MCRiskDetector:
     that delay has elapsed was almost certainly hit *before* the rollout started
     (pending death), not by the rollout's own actions.
 
-    We therefore define a risk event as:
+    The rollout runs in two phases:
+      Phase 1 (action probe): horizon_steps decision steps with biased random
+        actions — covers action_window = horizon_steps × frame_skip raw frames.
+      Phase 2 (NOOP wait): NOOP for the remaining hit_life_delay_frames raw
+        frames, letting any pending hits from Phase 1 materialize.
+
+    A risk event is defined as:
 
         life count decreases within [risk_min_frame, risk_max_frame]
 
     where:
         risk_min_frame = hit_life_delay_frames
-        risk_max_frame = hit_life_delay_frames + action_window_frames
+        risk_max_frame = hit_life_delay_frames + horizon_steps × frame_skip
 
     Any life loss before risk_min_frame is treated as a pre-existing hit → 0.
-    Any life loss after risk_max_frame is too distant to be imminent → 0.
 
     Parameters
     ----------
     env_id                : Gymnasium / ALE environment ID.
-    horizon_steps         : Rollout length in decision steps (default 45).
+    horizon_steps         : Action probe horizon in decision steps (default 13).
+                            Determines the causal window:
+                            action_window_frames = horizon_steps × frame_skip.
     frame_skip            : Raw frames per decision step (default 4).
     screen_size           : Resize target for manual preprocessing (default 84).
     n_stack               : Frame stack depth (default 4).
@@ -289,15 +294,13 @@ class MCRiskDetector:
     group_size            : Rollouts per policy group; total N = 3 × group_size.
     hit_life_delay_frames : Raw frames between a hit and the resulting life-loss
                             in ALE (default 120 for Space Invaders).
-    action_window_frames  : Width of the causal window — only hits that occur
-                            within this many frames of rollout start are counted
-                            as risk events (default 50).
+                            Equals risk_min_frame and the length of Phase 2.
     """
 
     def __init__(
         self,
         env_id: str,
-        horizon_steps: int = 45,
+        horizon_steps: int = 13,
         frame_skip: int = 4,
         screen_size: int = 84,
         n_stack: int = 4,
@@ -305,34 +308,25 @@ class MCRiskDetector:
         seed: int = 0,
         group_size: int = 8,
         hit_life_delay_frames: int = 120,
-        action_window_frames: int = 50,
     ):
-        self.horizon_steps        = horizon_steps
-        self.frame_skip           = frame_skip
-        self.screen_size          = screen_size
-        self.n_stack              = n_stack
-        self.group_size           = group_size
-        self.n_rollouts           = 3 * group_size
-        self.risk_min_frame       = hit_life_delay_frames
-        self.risk_max_frame       = hit_life_delay_frames + action_window_frames
+        self.horizon_steps   = horizon_steps
+        self.frame_skip      = frame_skip
+        self.screen_size     = screen_size
+        self.n_stack         = n_stack
+        self.group_size      = group_size
+        self.n_rollouts      = 3 * group_size
+        self.risk_min_frame  = hit_life_delay_frames
+        self.risk_max_frame  = hit_life_delay_frames + horizon_steps * frame_skip
 
-        required_raw = hit_life_delay_frames + action_window_frames
-        if horizon_steps * frame_skip < required_raw:
-            print(
-                f"[MCRisk] Warning: horizon_steps ({horizon_steps}) × frame_skip ({frame_skip}) "
-                f"= {horizon_steps * frame_skip} raw frames < "
-                f"hit_life_delay_frames + action_window_frames ({required_raw}). "
-                "Some risk events will be unreachable. "
-                "Consider increasing --mc_risk_horizon_steps."
-            )
-
+        action_window = horizon_steps * frame_skip
         print(
             f"[MCRisk] Delayed-life window:\n"
-            f"         hit_life_delay_frames={hit_life_delay_frames}\n"
-            f"         action_window_frames={action_window_frames}\n"
+            f"         hit_life_delay_frames={hit_life_delay_frames}  (= risk_min_frame)\n"
+            f"         action_window_frames={action_window}  (= horizon_steps × frame_skip)\n"
             f"         risk_event_window=[{self.risk_min_frame}, {self.risk_max_frame}]\n"
-            f"         horizon_steps={horizon_steps}\n"
-            f"         horizon_raw_frames={horizon_steps * frame_skip}"
+            f"         phase-1 (biased actions): {horizon_steps} steps × {frame_skip} = {action_window} raw frames\n"
+            f"         phase-2 (NOOP wait):      {hit_life_delay_frames} raw frames\n"
+            f"         total rollout:            {self.risk_max_frame} raw frames"
         )
 
         if num_workers > 1:
@@ -348,6 +342,7 @@ class MCRiskDetector:
         left = self._action_map['LEFT']
         right = self._action_map['RIGHT']
 
+        self._noop = noop
         self._acts = [noop, left, right]
 
         self._group_weights = [
@@ -446,68 +441,66 @@ class MCRiskDetector:
 
     def _run_one_rollout(self, ale_state, start_lives: int, group_idx: int) -> int:
         """
-        Restore state and run one biased rollout.
+        Restore state and run one biased rollout in two phases.
 
-        Steps
-        ──────
-        1. env.reset() clears gym wrapper's internal episode-done flag.
-        2. restore_ale_state() overwrites the ALE with the cloned checkpoint.
-           (reset() output is discarded; the ALE is the ground truth after this.)
-        3. Build initial 4-frame stack from the restored screen (4 copies).
-        4. For each of horizon_steps decision steps:
-             a. Sample action from the group's biased distribution.
-             b. Repeat the action for frame_skip raw ALE frames.
-             c. After each raw frame check for life-loss or game-over.
-             d. After all raw frames, update the frame stack.
-        5. Return 1 (risk event) if a life was lost or game ended, else 0.
+        Phase 1 — action probe (horizon_steps decision steps)
+            Samples biased random actions to explore the causal risk window.
+            Covers the first action_window_frames = horizon_steps × frame_skip
+            raw frames.
 
-        The frame stack is maintained even though the current biased policy
-        ignores it, so switching to a neural-network policy requires only
-        replacing the action-sampling line.
+        Phase 2 — NOOP wait (hit_life_delay_frames raw frames)
+            Holds NOOP to let any hits sustained during Phase 1 materialize as
+            life-loss events.  No new actions are sampled in this phase.
+
+        A risk event (return 1) is triggered when the life count drops or
+        game-over occurs inside [risk_min_frame, risk_max_frame].
+        Any life loss before risk_min_frame is treated as a pre-existing hit
+        carried into the rollout from before its start → return 0.
         """
-        # Step 1 & 2: reset wrapper state, then restore ALE checkpoint.
+        # Reset wrapper state, then restore ALE checkpoint.
         self._env.reset()
         restore_ale_state(self._env, ale_state)
 
         ale     = self._env.unwrapped.ale
         weights = self._group_weights[group_idx]
 
-        # Step 3: initialise frame stack with 4 copies of the restored screen.
+        # Initialise frame stack (ready for future network-policy upgrades).
         init_frame = self._get_frame()
         frame_stack = deque(
             [init_frame.copy() for _ in range(self.n_stack)],
             maxlen=self.n_stack,
         )
 
-        # Step 4: rollout loop.
         elapsed_raw_frames = 0
 
+        # ── Phase 1: biased action probe ──────────────────────────────────────
         for _ in range(self.horizon_steps):
             action = random.choices(self._acts, weights=weights, k=1)[0]
 
-            # Manually apply frame_skip raw steps.
             for _ in range(self.frame_skip):
                 self._env.step(action)
                 elapsed_raw_frames += 1
 
                 if ale.lives() < start_lives or self._is_game_over(ale):
-                    # Risk event only if life loss falls within the causal window.
-                    # Before risk_min_frame: pending hit from before rollout start.
-                    # After risk_max_frame:  too distant to be imminent.
                     if self.risk_min_frame <= elapsed_raw_frames <= self.risk_max_frame:
                         return 1
                     else:
                         return 0
 
-                # Stop early once we're past the observation window.
-                if elapsed_raw_frames > self.risk_max_frame:
-                    return 0
-
-            # Update frame stack after frame_skip steps.
-            # (Consumed by neural-network rollout policies, not biased random.)
             frame_stack.append(self._get_frame())
 
-        return 0   # no life loss in risk window across all horizon_steps
+        # ── Phase 2: NOOP wait to observe delayed life losses ─────────────────
+        while elapsed_raw_frames < self.risk_max_frame:
+            self._env.step(self._noop)
+            elapsed_raw_frames += 1
+
+            if ale.lives() < start_lives or self._is_game_over(ale):
+                if self.risk_min_frame <= elapsed_raw_frames <= self.risk_max_frame:
+                    return 1
+                else:
+                    return 0
+
+        return 0   # no life loss in risk window
 
     # ── Public interface ───────────────────────────────────────────────────────
 
@@ -684,7 +677,6 @@ def run_training(args) -> None:
             seed                  = args.seed,
             group_size            = args.mc_risk_group_size,
             hit_life_delay_frames = args.mc_risk_hit_life_delay_frames,
-            action_window_frames  = args.mc_risk_action_window_frames,
         )
         mc_risk_eval_interval_steps = args.mc_risk_eval_interval_frames // FRAME_SKIP
         print(
@@ -749,14 +741,6 @@ def run_training(args) -> None:
     start_time            = time.time()
 
     print(f"[Train] Starting — total_env_frames={args.total_env_frames:,}")
-
-    pbar = tqdm(
-        total=args.total_env_frames,
-        initial=env_frames,
-        unit="frames",
-        dynamic_ncols=True,
-        smoothing=0.01,
-    )
 
     while env_frames < args.total_env_frames:
 
@@ -1126,9 +1110,11 @@ def parse_args():
     # ── MC biased-rollout risk detector ──────────────────────────────────────
     p.add_argument('--use_mc_risk_detector', action='store_true',
                    help='Enable MC biased-rollout death-risk detector for offense')
-    p.add_argument('--mc_risk_horizon_steps', type=int, default=45,
-                   help='Rollout length in decision steps '
-                        '(default 45 = ceil(170/4); must cover hit_life_delay + action_window)')
+    p.add_argument('--mc_risk_horizon_steps', type=int, default=13,
+                   help='Action probe horizon in decision steps '
+                        '(action_window_frames = horizon_steps × frame_skip; '
+                        'default 13 → 52 raw frames of biased actions). '
+                        'Total rollout = hit_life_delay + action_window raw frames.')
     p.add_argument('--mc_risk_eval_interval_frames', type=int, default=80,
                    help='Raw env frames between MC risk evaluations '
                         '(80 frames = 20 decision steps)')
@@ -1142,12 +1128,9 @@ def parse_args():
                    help='Rollouts per policy group; total N = 3 × group_size')
     p.add_argument('--mc_risk_hit_life_delay_frames', type=int, default=120,
                    help='Raw frames between a bullet hit and the ALE life-count decrease '
-                        '(~120 for Space Invaders); life losses before this are treated as '
-                        'pre-existing hits and do NOT count as risk events')
-    p.add_argument('--mc_risk_action_window_frames', type=int, default=50,
-                   help='Causal window width in raw frames; only hits that occur within '
-                        'this many frames of rollout start can cause a risk event '
-                        '(risk_max_frame = hit_life_delay + action_window; default 50)')
+                        '(~120 for Space Invaders); sets risk_min_frame and the length of '
+                        'the Phase-2 NOOP-wait. Life losses before this are treated as '
+                        'pre-existing hits and do NOT count as risk events.')
 
     # ── Checkpointing ─────────────────────────────────────────────────────────
     p.add_argument('--checkpoint_interval', type=int, default=1_000_000,

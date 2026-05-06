@@ -35,9 +35,8 @@ python train_context_dqn_visualize.py \\
     --mode offense \\
     --use_mc_risk_detector \\
     --mc_risk_group_size 4 \\
-    --mc_risk_horizon_steps 45 \\
-    --mc_risk_hit_life_delay_frames 120 \\
-    --mc_risk_action_window_frames 50
+    --mc_risk_horizon_steps 13 \\
+    --mc_risk_hit_life_delay_frames 120
 
 # Trained learner checkpoint, greedy:
 python train_context_dqn_visualize.py \\
@@ -182,10 +181,9 @@ def restore_ale_state(env: gym.Env, state) -> None:
 # =============================================================================
 
 class MCRiskDetector:
-    def __init__(self, env_id: str, horizon_steps: int = 45, frame_skip: int = 4,
+    def __init__(self, env_id: str, horizon_steps: int = 13, frame_skip: int = 4,
                  screen_size: int = 84, n_stack: int = 4, seed: int = 0,
-                 group_size: int = 8, hit_life_delay_frames: int = 120,
-                 action_window_frames: int = 50):
+                 group_size: int = 8, hit_life_delay_frames: int = 120):
         self.horizon_steps  = horizon_steps
         self.frame_skip     = frame_skip
         self.screen_size    = screen_size
@@ -193,24 +191,17 @@ class MCRiskDetector:
         self.group_size     = group_size
         self.n_rollouts     = 3 * group_size
         self.risk_min_frame = hit_life_delay_frames
-        self.risk_max_frame = hit_life_delay_frames + action_window_frames
+        self.risk_max_frame = hit_life_delay_frames + horizon_steps * frame_skip
 
-        required_raw = hit_life_delay_frames + action_window_frames
-        if horizon_steps * frame_skip < required_raw:
-            print(
-                f"[MCRisk] Warning: horizon_steps ({horizon_steps}) × frame_skip ({frame_skip}) "
-                f"= {horizon_steps * frame_skip} raw frames < "
-                f"hit_life_delay_frames + action_window_frames ({required_raw}). "
-                "Some risk events will be unreachable. "
-                "Consider increasing --mc_risk_horizon_steps."
-            )
+        action_window = horizon_steps * frame_skip
         print(
             f"[MCRisk] Delayed-life window:\n"
-            f"         hit_life_delay_frames={hit_life_delay_frames}\n"
-            f"         action_window_frames={action_window_frames}\n"
+            f"         hit_life_delay_frames={hit_life_delay_frames}  (= risk_min_frame)\n"
+            f"         action_window_frames={action_window}  (= horizon_steps × frame_skip)\n"
             f"         risk_event_window=[{self.risk_min_frame}, {self.risk_max_frame}]\n"
-            f"         horizon_steps={horizon_steps}\n"
-            f"         horizon_raw_frames={horizon_steps * frame_skip}"
+            f"         phase-1 (biased actions): {horizon_steps} steps × {frame_skip} = {action_window} raw frames\n"
+            f"         phase-2 (NOOP wait):      {hit_life_delay_frames} raw frames\n"
+            f"         total rollout:            {self.risk_max_frame} raw frames"
         )
 
         self._env        = self._make_raw_env(env_id, seed)
@@ -219,6 +210,7 @@ class MCRiskDetector:
         noop  = self._action_map['NOOP']
         left  = self._action_map['LEFT']
         right = self._action_map['RIGHT']
+        self._noop = noop
         self._acts = [noop, left, right]
         self._group_weights = [
             [0.25, 0.50, 0.25],   # group 0: left-biased
@@ -272,6 +264,7 @@ class MCRiskDetector:
 
         elapsed_raw_frames = 0
 
+        # ── Phase 1: biased action probe ──────────────────────────────────────
         for _ in range(self.horizon_steps):
             action = random.choices(self._acts, weights=self._group_weights[group_idx], k=1)[0]
             for _ in range(self.frame_skip):
@@ -284,10 +277,19 @@ class MCRiskDetector:
                     else:
                         return 0
 
-                if elapsed_raw_frames > self.risk_max_frame:
+            frame_stack.append(self._get_frame())
+
+        # ── Phase 2: NOOP wait to observe delayed life losses ─────────────────
+        while elapsed_raw_frames < self.risk_max_frame:
+            self._env.step(self._noop)
+            elapsed_raw_frames += 1
+
+            if ale.lives() < start_lives or self._is_game_over(ale):
+                if self.risk_min_frame <= elapsed_raw_frames <= self.risk_max_frame:
+                    return 1
+                else:
                     return 0
 
-            frame_stack.append(self._get_frame())
         return 0
 
     def estimate_risk_from_env(self, train_env: gym.Env) -> tuple:
@@ -386,7 +388,6 @@ def record_episode(args) -> tuple[List[FrameRecord], List[str]]:
             group_size            = args.mc_risk_group_size,
             seed                  = args.seed,
             hit_life_delay_frames = args.mc_risk_hit_life_delay_frames,
-            action_window_frames  = args.mc_risk_action_window_frames,
         )
         mc_eval_interval_steps = args.mc_risk_eval_interval_frames // FRAME_SKIP
         print(
@@ -984,17 +985,16 @@ def parse_args():
     # MC risk
     p.add_argument('--use_mc_risk_detector', action='store_true',
                    help='Run MC biased-rollout risk detector and display results')
-    p.add_argument('--mc_risk_horizon_steps',           type=int,   default=45)
+    p.add_argument('--mc_risk_horizon_steps',           type=int,   default=13,
+                   help='Action probe horizon in decision steps '
+                        '(action_window = horizon_steps × frame_skip; default 13 → 52 raw frames)')
     p.add_argument('--mc_risk_eval_interval_frames',    type=int,   default=80)
     p.add_argument('--mc_risk_threshold',               type=float, default=0.4)
     p.add_argument('--mc_risk_frame_skip',              type=int,   default=4)
     p.add_argument('--mc_risk_group_size',              type=int,   default=8)
     p.add_argument('--mc_risk_hit_life_delay_frames',   type=int,   default=120,
                    help='Raw frames between bullet hit and ALE life-count decrease '
-                        '(~120 for Space Invaders; default 120)')
-    p.add_argument('--mc_risk_action_window_frames',    type=int,   default=50,
-                   help='Causal window width: hits within this many frames of rollout '
-                        'start count as risk events (default 50)')
+                        '(~120 for Space Invaders); sets risk_min_frame and Phase-2 length')
 
     return p.parse_args()
 
