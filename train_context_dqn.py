@@ -703,7 +703,7 @@ def run_training(args) -> None:
     replay_buf = ReplayBuffer(args.buffer_size)
 
     # ── Initial environment state ─────────────────────────────────────────────
-    obs, info  = env.reset(seed=args.seed + ep_num)
+    obs, info  = env.reset(seed=args.seed)
     prev_lives = get_lives(env)
     prev_risk  = risk_fn(obs, info, env)   # only used in defense mode
 
