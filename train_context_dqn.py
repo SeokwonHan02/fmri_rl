@@ -868,8 +868,17 @@ def run_training(args) -> None:
         # ─────────────────────────────────────────────────────────────────────
 
         if args.mode == 'offense':
-            # Raw game score, no modifications.
+            # Raw game score; add invasion penalty on terminal if enabled.
             custom_reward = float(original_reward)
+            if terminated and args.invasion_penalty != 0.0:
+                try:
+                    ram = env.unwrapped.ale.getRAM()
+                    # RAM[0x78]==84 → 3 bullet hits (bullet death)
+                    # RAM[0x78]!=84 → enemies reached bottom (invasion)
+                    if ram[0x78] != 84:
+                        custom_reward -= args.invasion_penalty
+                except Exception:
+                    pass
 
         else:  # defense
             # Score is removed entirely; shape purely for survival.
@@ -1100,6 +1109,11 @@ def parse_args():
                    help='Env frames between expert takeovers (400 = 100 steps)')
     p.add_argument('--defense_intervention_frames', type=int,   default=80,
                    help='Env frames per expert takeover (80 = 20 steps)')
+
+    # ── Offense reward ────────────────────────────────────────────────────────
+    p.add_argument('--invasion_penalty',     type=float, default=100.0,
+                   help='Penalty subtracted from reward when episode ends by '
+                        'enemy invasion (RAM[0x78]!=84 at terminal). ')
 
     # ── Defense reward ────────────────────────────────────────────────────────
     p.add_argument('--survival_reward',      type=float, default=0.001)

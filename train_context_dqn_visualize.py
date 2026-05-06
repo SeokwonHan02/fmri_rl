@@ -406,6 +406,24 @@ def record_episode(args) -> tuple[List[FrameRecord], List[str]]:
     obs, _ = env.reset(seed=args.seed)
     prev_lives = get_lives(env)
 
+    # ── Anti-flicker RGB buffer ────────────────────────────────────────────────
+    # AtariPreprocessing fixes flickering in the grayscale obs by taking the
+    # pixel-wise max of the last 2 raw ALE frames (frame_skip-2 and frame_skip-1).
+    # We replicate that here for the RGB display frame by hooking the raw env's
+    # step so every raw ALE frame is captured; only the last 2 slots matter.
+    _ale             = env.unwrapped.ale
+    _rgb_antif_buf   = np.stack([_ale.getScreenRGB()] * 2)  # (2, H, W, 3)
+    _raw_step_count  = [0]
+    _raw_step_orig   = env.unwrapped.step
+
+    def _raw_step_hooked(action):
+        result = _raw_step_orig(action)
+        _rgb_antif_buf[_raw_step_count[0] % 2] = _ale.getScreenRGB()
+        _raw_step_count[0] += 1
+        return result
+
+    env.unwrapped.step = _raw_step_hooked
+
     env_frames     = 0
     decision_steps = 0
     ep_return      = 0.0
@@ -428,10 +446,9 @@ def record_episode(args) -> tuple[List[FrameRecord], List[str]]:
 
     while True:
         # ── Capture colour frame BEFORE action ────────────────────────────────
-        #   This matches the obs the agent observed when selecting the action.
-        rgb = env.render()
-        if rgb is None:
-            rgb = np.zeros((210, 160, 3), dtype=np.uint8)
+        #   Pixel-wise max of the last 2 raw ALE frames (same as AtariPreprocessing)
+        #   eliminates per-frame sprite flicker (e.g. Space Invaders bullets).
+        rgb = np.maximum(_rgb_antif_buf[0], _rgb_antif_buf[1])
 
         # ── Q-values ─────────────────────────────────────────────────────────
         obs_t = obs_to_tensor(obs, device)
@@ -964,7 +981,7 @@ def parse_args():
                    help='Expert checkpoint used for intervention')
     p.add_argument('--mode',   default='offense', choices=['offense', 'defense'])
     p.add_argument('--env_id', default='SpaceInvadersNoFrameskip-v4')
-    p.add_argument('--seed',   type=int, default=42)
+    p.add_argument('--seed',   type=int, default=1)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
 
     # Episode settings
