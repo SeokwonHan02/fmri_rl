@@ -15,6 +15,8 @@ rsa_dqn_vs_cql.py
 entropy_*/
 analyze_*.py
 uncertainty_*/
+find_*.py
+train_context_dqn_visualize.py
 
 mat/
 mat_*/

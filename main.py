@@ -155,8 +155,8 @@ def main():
             test_file_idx=args.test_file_idx,
         )
         print(f"Train batches per epoch: {len(train_loader)}")
-        print(f"Val batches            : {len(val_loader)}")
-        print(f"Test batches           : {len(test_loader)}")
+        if val_loader  is not None: print(f"Val batches            : {len(val_loader)}")
+        if test_loader is not None: print(f"Test batches           : {len(test_loader)}")
 
     print("\nLoading pretrained DQN CNN (frozen)...")
     cnn = load_pretrained_cnn(args.dqn_path, freeze=True)
@@ -245,36 +245,36 @@ def main():
                 args.fire_loss_weight, args.move_loss_weight
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Loss: {train_loss:.4f}, Action Acc: {train_acc:.4f}\n"
-                    f"          Fire Loss: {train_fire_loss:.4f}, Fire Acc: {train_fire_acc:.4f}\n"
-                    f"          Move Loss: {train_move_loss:.4f}, Move Acc: {train_move_acc:.4f}"
-                )
-            else:
-                val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc, val_ce, val_wce = val_fn(
-                    model, val_loader, device, args.label_smoothing, fire_weights, move_weights,
-                    args.fire_loss_weight, args.move_loss_weight, action_weights
-                )
-                test_loss, test_acc, test_fire_loss, test_move_loss, test_fire_acc, test_move_acc, test_ce, test_wce = val_fn(
-                    model, test_loader, device, args.label_smoothing, fire_weights, move_weights,
-                    args.fire_loss_weight, args.move_loss_weight, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Loss: {train_loss:.4f}, Action Acc: {train_acc:.4f}\n"
-                    f"          Fire Loss: {train_fire_loss:.4f}, Fire Acc: {train_fire_acc:.4f}\n"
-                    f"          Move Loss: {train_move_loss:.4f}, Move Acc: {train_move_acc:.4f}\n"
-                    f"  Val   - Loss: {val_loss:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"          Fire Loss: {val_fire_loss:.4f}, Fire Acc: {val_fire_acc:.4f}\n"
-                    f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}\n"
-                    f"  Test  - Loss: {test_loss:.4f}, Action Acc: {test_acc:.4f}\n"
-                    f"          Fire Loss: {test_fire_loss:.4f}, Fire Acc: {test_fire_acc:.4f}\n"
-                    f"          Move Loss: {test_move_loss:.4f}, Move Acc: {test_move_acc:.4f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - Loss: {train_loss:.4f}, Action Acc: {train_acc:.4f}\n"
+                f"          Fire Loss: {train_fire_loss:.4f}, Fire Acc: {train_fire_acc:.4f}\n"
+                f"          Move Loss: {train_move_loss:.4f}, Move Acc: {train_move_acc:.4f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    val_loss, val_acc, val_fire_loss, val_move_loss, val_fire_acc, val_move_acc, val_ce, val_wce = val_fn(
+                        model, val_loader, device, args.label_smoothing, fire_weights, move_weights,
+                        args.fire_loss_weight, args.move_loss_weight, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - Loss: {val_loss:.4f}, Action Acc: {val_acc:.4f}\n"
+                        f"          Fire Loss: {val_fire_loss:.4f}, Fire Acc: {val_fire_acc:.4f}\n"
+                        f"          Move Loss: {val_move_loss:.4f}, Move Acc: {val_move_acc:.4f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}"
+                    )
+                if test_loader is not None:
+                    test_loss, test_acc, test_fire_loss, test_move_loss, test_fire_acc, test_move_acc, test_ce, test_wce = val_fn(
+                        model, test_loader, device, args.label_smoothing, fire_weights, move_weights,
+                        args.fire_loss_weight, args.move_loss_weight, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - Loss: {test_loss:.4f}, Action Acc: {test_acc:.4f}\n"
+                        f"          Fire Loss: {test_fire_loss:.4f}, Fire Acc: {test_fire_acc:.4f}\n"
+                        f"          Move Loss: {test_move_loss:.4f}, Move Acc: {test_move_acc:.4f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}"
+                    )
+            tqdm.write(log)
 
             # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
@@ -286,26 +286,28 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}"
-                )
-            else:
-                val_q_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
-                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                test_q_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
-                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                    f"  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"  Test  - Q Loss: {test_q_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - Q Loss: {train_q_loss:.4f}, Avg Q: {train_avg_q:.2f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    val_q_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
+                        model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - Q Loss: {val_q_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                    )
+                if test_loader is not None:
+                    test_q_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                        model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - Q Loss: {test_q_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                    )
+            tqdm.write(log)
 
             # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
@@ -317,27 +319,31 @@ def main():
                 model, train_loader, optimizer, device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, "
-                    f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}"
-                )
-            else:
-                val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
-                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                test_td_loss, test_cql_loss, test_total_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
-                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                    f"  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"  Test  - TD Loss: {test_td_loss:.4f}, CQL Loss: {test_cql_loss:.4f}, Total: {test_total_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - TD Loss: {train_td_loss:.4f}, CQL Loss: {train_cql_loss:.4f}, "
+                f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    val_td_loss, val_cql_loss, val_total_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
+                        model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - TD Loss: {val_td_loss:.4f}, CQL Loss: {val_cql_loss:.4f}, "
+                        f"Total: {val_total_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                    )
+                if test_loader is not None:
+                    test_td_loss, test_cql_loss, test_total_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                        model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - TD Loss: {test_td_loss:.4f}, CQL Loss: {test_cql_loss:.4f}, "
+                        f"Total: {test_total_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                    )
+            tqdm.write(log)
 
             # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
@@ -351,36 +357,37 @@ def main():
                 args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD: {train_td:.4f}, CQL: {train_cql_loss:.4f}, KL: {train_kl:.4f}, "
-                    f"Total: {train_total:.4f}, Q: {train_avg_q:.2f}, Var: {train_avg_var:.4f}"
-                )
-            else:
-                (val_td, val_cql_loss, val_kl, val_total,
-                 val_avg_q, val_avg_var,
-                 val_ce, val_wce, val_acc) = val_fn(
-                    model, val_loader, device,
-                    args.gamma, args.reward_scale, action_weights
-                )
-                (test_td, test_cql_loss, test_kl, test_total,
-                 test_avg_q, test_avg_var,
-                 test_ce, test_wce, test_acc) = val_fn(
-                    model, test_loader, device,
-                    args.gamma, args.reward_scale, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD: {train_td:.4f}, CQL: {train_cql_loss:.4f}, KL: {train_kl:.4f}, "
-                    f"Total: {train_total:.4f}, Q: {train_avg_q:.2f}, Var: {train_avg_var:.4f}\n"
-                    f"  Val   - TD: {val_td:.4f}, CQL: {val_cql_loss:.4f}, KL: {val_kl:.4f}, "
-                    f"Total: {val_total:.4f}, Q: {val_avg_q:.2f}, Var: {val_avg_var:.4f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"  Test  - TD: {test_td:.4f}, CQL: {test_cql_loss:.4f}, KL: {test_kl:.4f}, "
-                    f"Total: {test_total:.4f}, Q: {test_avg_q:.2f}, Var: {test_avg_var:.4f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - TD: {train_td:.4f}, CQL: {train_cql_loss:.4f}, KL: {train_kl:.4f}, "
+                f"Total: {train_total:.4f}, Q: {train_avg_q:.2f}, Var: {train_avg_var:.4f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    (val_td, val_cql_loss, val_kl, val_total,
+                     val_avg_q, val_avg_var,
+                     val_ce, val_wce, val_acc) = val_fn(
+                        model, val_loader, device,
+                        args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - TD: {val_td:.4f}, CQL: {val_cql_loss:.4f}, KL: {val_kl:.4f}, "
+                        f"Total: {val_total:.4f}, Q: {val_avg_q:.2f}, Var: {val_avg_var:.4f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                    )
+                if test_loader is not None:
+                    (test_td, test_cql_loss, test_kl, test_total,
+                     test_avg_q, test_avg_var,
+                     test_ce, test_wce, test_acc) = val_fn(
+                        model, test_loader, device,
+                        args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - TD: {test_td:.4f}, CQL: {test_cql_loss:.4f}, KL: {test_kl:.4f}, "
+                        f"Total: {test_total:.4f}, Q: {test_avg_q:.2f}, Var: {test_avg_var:.4f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                    )
+            tqdm.write(log)
 
             # Save model every save_interval epochs (safe_save로 EOCD 누락 방지)
             if epoch % args.save_interval == 0:
@@ -394,28 +401,29 @@ def main():
                 args.ce_lambda
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
-                    f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}"
-                )
-            else:
-                val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
-                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                test_td_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
-                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
-                    f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}\n"
-                    f"  Val   - TD: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"  Test  - TD: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - TD: {train_td_loss:.4f}, CE: {train_ce_loss:.4f}, "
+                f"Total: {train_total_loss:.4f}, Avg Q: {train_avg_q:.2f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    val_td_loss, val_avg_q, val_ce, val_wce, val_acc = val_fn(
+                        model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - TD: {val_td_loss:.4f}, Avg Q: {val_avg_q:.2f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                    )
+                if test_loader is not None:
+                    test_td_loss, test_avg_q, test_ce, test_wce, test_acc = val_fn(
+                        model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - TD: {test_td_loss:.4f}, Avg Q: {test_avg_q:.2f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                    )
+            tqdm.write(log)
 
             # Save heads only (CNN is always the same pretrained encoder)
             if epoch % args.save_interval == 0:
@@ -429,38 +437,38 @@ def main():
                 device, args.gamma, args.target_update_freq, args.reward_scale
             )
 
-            if args.all_data:
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Q: {train_q_loss:.4f}, V: {train_v_loss:.4f}, "
-                    f"Actor: {train_actor_loss:.4f}, Avg Q: {train_avg_q:.2f}, "
-                    f"Avg V: {train_avg_v:.2f}, Adv: {train_avg_adv:.2f}, W: {train_avg_w:.2f}"
-                )
-            else:
-                (val_q_loss, val_v_loss, val_actor_loss,
-                 val_avg_q, val_avg_v, val_avg_adv, val_avg_w,
-                 val_ce, val_wce, val_acc) = val_iql(
-                    model, val_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                (test_q_loss, test_v_loss, test_actor_loss,
-                 test_avg_q, test_avg_v, test_avg_adv, test_avg_w,
-                 test_ce, test_wce, test_acc) = val_iql(
-                    model, test_loader, device, args.gamma, args.reward_scale, action_weights
-                )
-                tqdm.write(
-                    f"Epoch {epoch}/{args.epochs}\n"
-                    f"  Train - Q: {train_q_loss:.4f}, V: {train_v_loss:.4f}, "
-                    f"Actor: {train_actor_loss:.4f}, Avg Q: {train_avg_q:.2f}, "
-                    f"Avg V: {train_avg_v:.2f}, Adv: {train_avg_adv:.2f}, W: {train_avg_w:.2f}\n"
-                    f"  Val   - Q: {val_q_loss:.4f}, V: {val_v_loss:.4f}, "
-                    f"Actor: {val_actor_loss:.4f}, Avg Q: {val_avg_q:.2f}, "
-                    f"Avg V: {val_avg_v:.2f}, Adv: {val_avg_adv:.2f}, W: {val_avg_w:.2f}\n"
-                    f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}\n"
-                    f"  Test  - Q: {test_q_loss:.4f}, V: {test_v_loss:.4f}, "
-                    f"Actor: {test_actor_loss:.4f}, Avg Q: {test_avg_q:.2f}, "
-                    f"Avg V: {test_avg_v:.2f}, Adv: {test_avg_adv:.2f}, W: {test_avg_w:.2f}\n"
-                    f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
-                )
+            log = (
+                f"Epoch {epoch}/{args.epochs}\n"
+                f"  Train - Q: {train_q_loss:.4f}, V: {train_v_loss:.4f}, "
+                f"Actor: {train_actor_loss:.4f}, Avg Q: {train_avg_q:.2f}, "
+                f"Avg V: {train_avg_v:.2f}, Adv: {train_avg_adv:.2f}, W: {train_avg_w:.2f}"
+            )
+            if not args.all_data:
+                if val_loader is not None:
+                    (val_q_loss, val_v_loss, val_actor_loss,
+                     val_avg_q, val_avg_v, val_avg_adv, val_avg_w,
+                     val_ce, val_wce, val_acc) = val_iql(
+                        model, val_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Val   - Q: {val_q_loss:.4f}, V: {val_v_loss:.4f}, "
+                        f"Actor: {val_actor_loss:.4f}, Avg Q: {val_avg_q:.2f}, "
+                        f"Avg V: {val_avg_v:.2f}, Adv: {val_avg_adv:.2f}, W: {val_avg_w:.2f}\n"
+                        f"          CE: {val_ce:.4f}, Weighted CE: {val_wce:.4f}, Action Acc: {val_acc:.4f}"
+                    )
+                if test_loader is not None:
+                    (test_q_loss, test_v_loss, test_actor_loss,
+                     test_avg_q, test_avg_v, test_avg_adv, test_avg_w,
+                     test_ce, test_wce, test_acc) = val_iql(
+                        model, test_loader, device, args.gamma, args.reward_scale, action_weights
+                    )
+                    log += (
+                        f"\n  Test  - Q: {test_q_loss:.4f}, V: {test_v_loss:.4f}, "
+                        f"Actor: {test_actor_loss:.4f}, Avg Q: {test_avg_q:.2f}, "
+                        f"Avg V: {test_avg_v:.2f}, Adv: {test_avg_adv:.2f}, W: {test_avg_w:.2f}\n"
+                        f"          CE: {test_ce:.4f}, Weighted CE: {test_wce:.4f}, Action Acc: {test_acc:.4f}"
+                    )
+            tqdm.write(log)
 
             if epoch % args.save_interval == 0:
                 safe_save(model.state_dict(), save_dir / f'epoch_{epoch}.pth')

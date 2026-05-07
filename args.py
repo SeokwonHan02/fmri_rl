@@ -19,10 +19,11 @@ def get_args():
                         help='Batch size for training')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='Number of data loading workers')
-    parser.add_argument('--val-file-idx', type=int, default=9,
-                        help='Index of validation file (0-based)')
-    parser.add_argument('--test-file-idx', type=int, default=10,
-                        help='Index of test file (0-based)')
+    parser.add_argument('--val-file-idx', type=int, default=None,
+                        help='Index of validation file (0-based). Omit to skip validation.')
+    parser.add_argument('--test-file-idx', type=int, default=None,
+                        help='Index of test file (0-based). Omit to skip test. '
+                             'Can be given without --val-file-idx to run test only.')
     parser.add_argument('--all-data', action='store_true', default=False,
                         help='Use all files for both training and validation (no train/val/test split)')
 

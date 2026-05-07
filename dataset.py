@@ -123,22 +123,17 @@ def create_dataloader(data_dir, batch_size, subject, num_workers=4, shuffle=True
 
 
 def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
-                                  val_file_idx=10, test_file_idx=11):
+                                  val_file_idx=None, test_file_idx=None):
     """
     Create train / val / test dataloaders with an expanding window split.
 
     Expanding window (respects temporal order of data):
-      - train : files with index < val_file_idx  (indices 0 .. val_file_idx-1)
-      - val   : file  with index == val_file_idx
-      - test  : file  with index == test_file_idx
+      - val=X, test=Y  → train: indices < X,  val: [X],  test: [Y]
+      - val=None, test=Y → train: all except Y, val: None, test: [Y]
+      - val=X, test=None → train: indices < X,  val: [X],  test: None
+      - val=None, test=None → train: all files,  val: None, test: None
 
-    Args:
-        data_dir: Base directory containing processed data
-        batch_size: Batch size for training
-        subject: Subject ID (e.g., 'sub_1')
-        num_workers: Number of data loading workers
-        val_file_idx: Index of validation file (0-based); must be >= 1
-        test_file_idx: Index of test file (0-based); must be > val_file_idx
+    Returns (train_loader, val_loader, test_loader) where val/test may be None.
     """
     subject_dir = Path(data_dir) / subject
     if not subject_dir.exists():
@@ -149,39 +144,57 @@ def create_train_val_dataloaders(data_dir, batch_size, subject, num_workers=4,
 
     if n_files == 0:
         raise ValueError(f"No npz files found in {subject_dir}")
-    if val_file_idx < 0 or val_file_idx >= n_files:
-        raise ValueError(f"val_file_idx={val_file_idx} out of range [0, {n_files-1}]")
-    if test_file_idx < 0 or test_file_idx >= n_files:
-        raise ValueError(f"test_file_idx={test_file_idx} out of range [0, {n_files-1}]")
-    if val_file_idx == test_file_idx:
-        raise ValueError(f"val_file_idx and test_file_idx must be different")
 
-    train_files = [f for i, f in enumerate(npz_files) if i < val_file_idx]
-    val_files   = [npz_files[val_file_idx]]
-    test_files  = [npz_files[test_file_idx]]
+    # Validate provided indices
+    for name, idx in [('val_file_idx', val_file_idx), ('test_file_idx', test_file_idx)]:
+        if idx is not None and not (0 <= idx < n_files):
+            raise ValueError(f"{name}={idx} out of range [0, {n_files-1}]")
+    if val_file_idx is not None and test_file_idx is not None and val_file_idx == test_file_idx:
+        raise ValueError("val_file_idx and test_file_idx must be different")
 
-    train_indices = list(range(val_file_idx))
-    print(f"\nSplitting data (expanding window):")
+    # Determine train files
+    excluded = {i for i in [val_file_idx, test_file_idx] if i is not None}
+    if val_file_idx is not None:
+        train_files = [f for i, f in enumerate(npz_files) if i < val_file_idx]
+    else:
+        train_files = [f for i, f in enumerate(npz_files) if i not in excluded]
+
+    val_files  = [npz_files[val_file_idx]]  if val_file_idx  is not None else []
+    test_files = [npz_files[test_file_idx]] if test_file_idx is not None else []
+
+    train_indices = [i for i, f in enumerate(npz_files) if f in train_files]
+    print(f"\nSplitting data:")
     print(f"  Total files    : {n_files}")
     print(f"  Train files    : {len(train_files)}  (indices {train_indices})")
-    print(f"  Val  file      : {Path(npz_files[val_file_idx]).name}  (index {val_file_idx})")
-    print(f"  Test file      : {Path(npz_files[test_file_idx]).name}  (index {test_file_idx})")
+    if val_files:
+        print(f"  Val  file      : {Path(val_files[0]).name}  (index {val_file_idx})")
+    else:
+        print(f"  Val  file      : None (skipped)")
+    if test_files:
+        print(f"  Test file      : {Path(test_files[0]).name}  (index {test_file_idx})")
+    else:
+        print(f"  Test file      : None (skipped)")
 
     use_pin_memory = torch.cuda.is_available()
 
     print(f"\nLoading training data...")
     train_dataset = OfflineRLDataset(npz_files=train_files)
-    print(f"\nLoading validation data...")
-    val_dataset   = OfflineRLDataset(npz_files=val_files)
-    print(f"\nLoading test data...")
-    test_dataset  = OfflineRLDataset(npz_files=test_files)
+    train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                               num_workers=num_workers, pin_memory=use_pin_memory)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
-    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=use_pin_memory)
+    val_loader = None
+    if val_files:
+        print(f"\nLoading validation data...")
+        val_loader = DataLoader(OfflineRLDataset(npz_files=val_files),
+                                batch_size=batch_size, shuffle=False,
+                                num_workers=num_workers, pin_memory=use_pin_memory)
+
+    test_loader = None
+    if test_files:
+        print(f"\nLoading test data...")
+        test_loader = DataLoader(OfflineRLDataset(npz_files=test_files),
+                                 batch_size=batch_size, shuffle=False,
+                                 num_workers=num_workers, pin_memory=use_pin_memory)
 
     return train_loader, val_loader, test_loader
 
