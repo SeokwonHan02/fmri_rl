@@ -204,10 +204,12 @@ def main():
         print(f"ProbCQL: α={args.cql_alpha}, β_kl={args.prob_cql_beta_kl}")
 
     elif args.algo == 'ensemble_dqn':
-        model = EnsembleDQN(cnn, num_heads=args.num_heads, action_dim=6)
+        model = EnsembleDQN(cnn, num_heads=args.num_heads, action_dim=6,
+                            temp=args.ens_temp, agg=args.ens_agg)
         train_fn = train_ensemble_dqn
         val_fn = val_ensemble_dqn
-        print(f"EnsembleDQN: {args.num_heads} heads, mask_prob={args.mask_prob}")
+        print(f"EnsembleDQN: {args.num_heads} heads, mask_prob={args.mask_prob}, "
+              f"temp={args.ens_temp}, agg={args.ens_agg}")
 
     elif args.algo == 'iql':
         model = IQL(cnn, action_dim=6, tau=args.iql_tau, beta=args.iql_beta,

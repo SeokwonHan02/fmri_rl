@@ -60,6 +60,13 @@ def get_args():
                              '(1.0 = all samples per head, 0.5 = half the batch per head)')
     parser.add_argument('--ce-lambda', type=float, default=1.0,
                         help='Weight for CE regularization loss in EnsembleDQN (total = td + λ * ce)')
+    parser.add_argument('--ens-temp', type=float, default=1.0,
+                        help='Softmax temperature for EnsembleDQN CE loss. '
+                             'Logits are divided by temp before softmax. '
+                             '>1 = softer policy, <1 = sharper. Default 1.0.')
+    parser.add_argument('--ens-agg', type=str, default='mean', choices=['mean', 'min'],
+                        help='How to aggregate Q-values across heads. '
+                             'mean = average (default), min = pessimistic minimum.')
 
     # IQL specific
     parser.add_argument('--iql-tau', type=float, default=0.7,

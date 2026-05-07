@@ -34,19 +34,16 @@ _HERE = Path(__file__).resolve().parent   # ensemble/
 _ROOT = _HERE.parent                       # fMRI_RL/
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DATA_DIR    = _ROOT / 'processed_data_frameskip_4' / 'sub_2'
-MODEL_PATH  = _HERE / 'trained_ensemble_model' / 'sub_2_run_10.pth'
+DATA_DIR    = _ROOT / 'processed_data_frameskip_4' / 'sub_6'
+MODEL_PATH  = _HERE / 'trained_ensemble_model' / 'sub_6_run_10.pth'
 DQN_PATH    = _ROOT / 'pretrained' / 'dqn_cnn.pt'
 OUT_DIR     = _HERE / 'results'
-SUBJECT     = 'sub_2'
+SUBJECT     = 'sub_6'
 RUN_IDX     = 10           # 0-based index of the held-out run
 HORIZON_SEC = 5.0          # future window for reward / switch analyses
 N_BINS      = 10
 EPS         = 1e-12
 BATCH_SIZE  = 512
-TEMP        = 1.0          # softmax temperature for uncertainty (>1 = softer, <1 = sharper)
-AGG         = 'mean'       # head aggregation: 'mean' = mean of per-head softmaxes,
-                           #                   'min'  = softmax of min Q across heads (pessimistic)
 
 # Direction group: NOOP/FIRE→0, RIGHT/RIGHT+FIRE→1, LEFT/LEFT+FIRE→2
 _ACTION_TO_DIR = np.array([0, 0, 1, 2, 1, 2], dtype=np.int32)
@@ -155,28 +152,17 @@ def extract_q_all(heads: nn.ModuleList,
 
 # ── Uncertainty decomposition ─────────────────────────────────────────────────
 
-def compute_uncertainty(q_all: np.ndarray, temp: float = 1.0, agg: str = 'mean'):
+def compute_uncertainty(q_all: np.ndarray):
     """
-    PEN decomposition with temperature scaling and head aggregation.
+    PEN decomposition.
     q_all : (N, H, 6)
-    temp  : softmax temperature — each logit is divided by temp before softmax.
-            temp > 1 → softer (higher entropy baseline), temp < 1 → sharper.
-    agg   : how to aggregate Q-values across heads for the total-entropy distribution.
-            'mean' — average of per-head softmaxes: mean_h softmax(Q_h / T)
-            'min'  — softmax of element-wise min Q across heads: softmax(min_h Q_h / T)
-                     (pessimistic / conservative estimate)
     returns: aleatoric (N,), epistemic (N,), total (N,)  all float64
     """
-    probs_all = _softmax(q_all / temp, axis=2)                                 # (N, H, 6)
-    if agg == 'mean':
-        probs_agg = probs_all.mean(axis=1)                                     # (N, 6)
-    elif agg == 'min':
-        probs_agg = _softmax(q_all.min(axis=1) / temp, axis=1)                # (N, 6)
-    else:
-        raise ValueError(f"agg must be 'mean' or 'min', got {agg!r}")
-    total     = -(probs_agg * np.log(probs_agg + EPS)).sum(axis=1)            # (N,)
-    aleatoric = -(probs_all * np.log(probs_all + EPS)).sum(axis=2).mean(axis=1)  # (N,)
-    epistemic = total - aleatoric
+    probs_all  = _softmax(q_all, axis=2)                                       # (N, H, 6)
+    probs_mean = probs_all.mean(axis=1)                                        # (N, 6)
+    total      = -(probs_mean * np.log(probs_mean + EPS)).sum(axis=1)         # (N,)
+    aleatoric  = -(probs_all  * np.log(probs_all  + EPS)).sum(axis=2).mean(axis=1)  # (N,)
+    epistemic  = total - aleatoric
     return aleatoric.astype(np.float64), epistemic.astype(np.float64), total.astype(np.float64)
 
 
@@ -606,7 +592,7 @@ def main():
     q_all = extract_q_all(heads, dqn_model, states)      # (N, H, 6)
     print(f'  q_all shape: {q_all.shape}')
 
-    aleatoric, epistemic, total = compute_uncertainty(q_all, temp=TEMP, agg=AGG)
+    aleatoric, epistemic, total = compute_uncertainty(q_all)
     unc_dict = {'aleatoric': aleatoric, 'epistemic': epistemic, 'total': total}
 
     print(f'  aleatoric : mean={aleatoric.mean():.4f}  std={aleatoric.std():.4f}'

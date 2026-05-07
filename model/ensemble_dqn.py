@@ -12,11 +12,14 @@ class EnsembleDQN(nn.Module):
     The encoder is always frozen; only the MLP heads are trained.
     Each head has a corresponding target head for stable Q-learning.
     """
-    def __init__(self, cnn, num_heads=20, action_dim=6, hidden_dim=512):
+    def __init__(self, cnn, num_heads=20, action_dim=6, hidden_dim=512,
+                 temp=1.0, agg='mean'):
         super(EnsembleDQN, self).__init__()
 
         self.action_dim = action_dim
-        self.num_heads = num_heads
+        self.num_heads  = num_heads
+        self.temp       = temp   # softmax temperature for CE loss (>1 softer, <1 sharper)
+        self.agg        = agg    # head aggregation: 'mean' or 'min'
 
         # CNN (always frozen)
         self.cnn = cnn
@@ -58,16 +61,23 @@ class EnsembleDQN(nn.Module):
         return q_all
 
     def get_action(self, state, deterministic=True):
-        """Select action using mean Q-values across all heads."""
+        """Select action using aggregated Q-values across all heads."""
         if state.dim() == 3:
             state = state.unsqueeze(0)
 
         with torch.no_grad():
-            q_all = self.forward(state)
-            mean_q = q_all.mean(dim=1)
-            action = mean_q.argmax(dim=-1)
+            q_all  = self.forward(state)
+            agg_q  = self._aggregate(q_all)
+            action = agg_q.argmax(dim=-1)
 
         return action.item() if action.numel() == 1 else action
+
+    def _aggregate(self, q_all):
+        """Aggregate Q-values across heads: (B, H, A) → (B, A)."""
+        if self.agg == 'mean':
+            return q_all.mean(dim=1)
+        else:  # min
+            return q_all.min(dim=1).values
 
     def update_target(self):
         """Hard update: copy current head weights to target heads."""
@@ -154,12 +164,12 @@ def train_ensemble_dqn(model, dataloader, optimizer, device, gamma=0.99,
         mask_sum = masks.sum().clamp_min(1.0)
         td_loss = (td_loss_per * masks).sum() / mask_sum
 
-        # BC regularization: z-score normalize mean Q, compute CE loss toward data actions
-        mean_q  = current_q_all.mean(dim=1)                            # (batch_size, action_dim)
-        q_mean  = mean_q.mean(dim=-1, keepdim=True)
-        q_std   = mean_q.std(dim=-1, keepdim=True) + 1e-8
-        z_values = (mean_q - q_mean) / q_std
-        ce_loss = F.cross_entropy(z_values, action_idx)
+        # BC regularization: z-score normalize aggregated Q, compute CE loss toward data actions
+        agg_q    = model._aggregate(current_q_all)                     # (batch_size, action_dim)
+        q_mean   = agg_q.mean(dim=-1, keepdim=True)
+        q_std    = agg_q.std(dim=-1, keepdim=True) + 1e-8
+        z_values = (agg_q - q_mean) / q_std
+        ce_loss  = F.cross_entropy(z_values / model.temp, action_idx)
 
         total_loss = td_loss + ce_lambda * ce_loss
 
@@ -175,7 +185,7 @@ def train_ensemble_dqn(model, dataloader, optimizer, device, gamma=0.99,
         total_td_loss    += td_loss.item()    * batch_size
         total_ce_loss    += ce_loss.item()    * batch_size
         total_total_loss += total_loss.item() * batch_size
-        total_q_value    += mean_q.detach().mean().item() * batch_size
+        total_q_value    += agg_q.detach().mean().item() * batch_size
         total_samples    += batch_size
 
     return (
@@ -233,34 +243,34 @@ def val_ensemble_dqn(model, dataloader, device, gamma=0.99, reward_scale=0.1,
             current_q_all = torch.stack(
                 [head(features) for head in model.heads], dim=1
             )  # (batch_size, num_heads, action_dim)
-            mean_q = current_q_all.mean(dim=1)  # (batch_size, action_dim)
+            agg_q = model._aggregate(current_q_all)  # (batch_size, action_dim)
 
-            # Double DQN: online mean Q selects action, target mean Q evaluates it
+            # Double DQN: aggregated online Q selects action, aggregated target Q evaluates it
             next_q_online = torch.stack(
                 [head(next_features) for head in model.heads], dim=1
             )  # (batch_size, num_heads, action_dim)
-            next_best_actions = next_q_online.mean(dim=1).argmax(dim=-1, keepdim=True)  # (batch_size, 1)
+            next_best_actions = model._aggregate(next_q_online).argmax(dim=-1, keepdim=True)  # (batch_size, 1)
 
             next_q_targets = torch.stack(
                 [head(next_features) for head in model.target_heads], dim=1
             )  # (batch_size, num_heads, action_dim)
-            next_q_value = next_q_targets.mean(dim=1).gather(1, next_best_actions).squeeze(1)  # (batch_size,)
+            next_q_value = model._aggregate(next_q_targets).gather(1, next_best_actions).squeeze(1)  # (batch_size,)
             target_q = reward + gamma * next_q_value * (1 - done)
 
-            # TD loss using mean Q-values
-            q_value = mean_q.gather(1, action_idx.unsqueeze(1)).squeeze(1)
+            # TD loss using aggregated Q-values
+            q_value = agg_q.gather(1, action_idx.unsqueeze(1)).squeeze(1)
             td_loss = F.smooth_l1_loss(q_value, target_q)
 
-            # CE loss: Z-score normalize mean Q-values
-            q_mean   = mean_q.mean(dim=-1, keepdim=True)
-            q_std    = mean_q.std(dim=-1, keepdim=True) + 1e-8
-            z_values = (mean_q - q_mean) / q_std
-            ce_loss  = F.cross_entropy(z_values, action_idx)
-            wce_loss = F.cross_entropy(z_values, action_idx, weight=action_weights)
-            action_pred = z_values.argmax(dim=-1)
+            # CE loss: Z-score normalize aggregated Q-values, apply temperature
+            q_mean   = agg_q.mean(dim=-1, keepdim=True)
+            q_std    = agg_q.std(dim=-1, keepdim=True) + 1e-8
+            z_values = (agg_q - q_mean) / q_std
+            ce_loss  = F.cross_entropy(z_values / model.temp, action_idx)
+            wce_loss = F.cross_entropy(z_values / model.temp, action_idx, weight=action_weights)
+            action_pred = z_values.argmax(dim=-1)  # argmax is temp-invariant
 
             total_td_loss  += td_loss.item() * batch_size
-            total_q_value  += mean_q.mean().item() * batch_size
+            total_q_value  += agg_q.mean().item() * batch_size
             total_ce_loss  += ce_loss.item() * batch_size
             total_wce_loss += wce_loss.item() * batch_size
             total_correct  += (action_pred == action_idx).sum().item()
