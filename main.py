@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.optim as optim
 import numpy as np
@@ -20,11 +21,35 @@ from eval import evaluate_agent
 
 
 def safe_save(obj, path: Path):
-    """원자적 저장: tmp 파일에 먼저 쓴 뒤 rename해 EOCD 누락 방지."""
+    """원자적 저장: 동일 fd로 flush+fsync 후 rename, directory fsync로 NFS 완전 보장."""
     path = Path(path)
-    tmp  = path.with_suffix('.tmp')
-    torch.save(obj, tmp)
-    tmp.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        with open(tmp, "wb") as f:
+            torch.save(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp, path)
+
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def set_seed(seed):
