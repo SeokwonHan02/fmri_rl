@@ -530,6 +530,9 @@ def main():
             tqdm.write(eval_output)
             tqdm.write(f"{'='*80}\n")
 
+    # 모든 저장 완료 후 NFS dirty 페이지 강제 flush
+    os.sync()
+
     print("\n" + "="*80)
     print("Training complete!")
     print(f"All models saved to: {save_dir}")
